@@ -590,9 +590,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
                             typename Kernel_traits::SmemLayoutQ{});
     Tensor sK = make_tensor(sQ.data() + size(sQ), typename Kernel_traits::SmemLayoutK{});
+    Tensor sK2 = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutK{});
     Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutV{});
     Tensor sVt = make_tensor(Kernel_traits::Share_KV ? sK.data() : sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
     Tensor sVtNoSwizzle = make_tensor(Kernel_traits::Share_KV ? sK.data() : sV.data(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
+    Tensor sVtNoSwizzle2 = make_tensor(sK2.data(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
 
     typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
@@ -613,27 +615,15 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
     Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
     Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
+    Tensor tSrK2  = thr_mma.partition_fragment_B(sK2);                           // (MMA,MMA_N,MMA_K)
+    Tensor tSrS = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
+    Tensor acc_s = make_tensor(tSrS.data(), flash::convert_gmma_to_mma_tensor(tSrS.layout()));  // (4, MMA_M, X)
     typename Kernel_traits::TiledMmaO tiled_mma_o;
     auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
     Tensor tOrVt  = thr_mma_o.partition_fragment_B(sVtNoSwizzle);                // (MMA, MMA_K,MMA_N)
-
-    Tensor acc_o = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // MMA, MMA_M, MMA_K
-
-    //
-    // Copy Atom retiling
-    //
-
-    auto smem_tiled_copy_Q = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
-    auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(tidx);
-    Tensor tSsQ = smem_thr_copy_Q.partition_S(sQ);
-
-    auto smem_tiled_copy_K = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
-    auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(tidx);
-    Tensor tSsK = smem_thr_copy_K.partition_S(sK);
-
-    auto smem_tiled_copy_V = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma_o);
-    auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
-    Tensor tOsVt = smem_thr_copy_V.partition_S(sVt);
+    Tensor tOrVt2  = thr_mma_o.partition_fragment_B(sVtNoSwizzle2);                // (MMA, MMA_K,MMA_N)
+    Tensor tOrO = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
+    Tensor acc_o = make_tensor(tOrO.data(), flash::convert_gmma_to_mma_tensor(tOrO.layout()));  // (4, MMA_M, X)
 
     // PREDICATES
     //
@@ -840,9 +830,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
     #pragma unroll
     for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step, --n_block) {
-        Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
-            clear(acc_s);
+            clear(tSrS);
         }
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -870,10 +859,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
 
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
-            flash::gemm(
-                acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K,
-                smem_thr_copy_Q, smem_thr_copy_K
-            );
+            flash::gemm(tiled_mma, tSrQ, sK_flag ? tSrK : tSrK2, tSrS);
             // if (cute::thread0()) { print(acc_s); }
 
             mask.template apply_mask<Is_causal, Is_even_MN>(
@@ -901,7 +887,6 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             }
             if (Kernel_traits::Share_KV) {
                 tKsK.data() = tKsK.data() + (sK_flag ? size(sK) : -size(sK));
-                tSsK.data() = tSsK.data() + (sK_flag ? size(sK) : -size(sK));
                 sK_flag = !sK_flag;
             }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
@@ -936,10 +921,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
-        flash::gemm_rs<Kernel_traits::gemm_o_patition_N>(acc_o, tOrP, tOrVt, tOsVt, tiled_mma_o, smem_tiled_copy_V, smem_thr_copy_V);
+        flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
 
         if (Kernel_traits::Share_KV) {
-            tOsVt.data() = tOsVt.data() + (sV_flag ? size(sK) : -size(sK));
             sV_flag = !sV_flag;
         }
 
@@ -952,9 +936,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     // These are the iterations where we don't need masking on S
     for (; n_block >= n_block_min; --n_block) {
-        Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
-            clear(acc_s);
+            clear(tSrS);
         }
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -975,10 +958,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
 
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
-            flash::gemm(
-                acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K,
-                smem_thr_copy_Q, smem_thr_copy_K
-            );
+            flash::gemm(tiled_mma, tSrQ, sK_flag ? tSrK : tSrK2, tSrS);
         }
 
         if (!Kernel_traits::Share_KV) {
@@ -999,7 +979,6 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             }
             if (Kernel_traits::Share_KV) {
                 tKsK.data() = tKsK.data() + (sK_flag ? size(sK) : -size(sK));
-                tSsK.data() = tSsK.data() + (sK_flag ? size(sK) : -size(sK));
                 sK_flag = !sK_flag;
             }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
@@ -1033,10 +1012,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
-        flash::gemm_rs<Kernel_traits::gemm_o_patition_N>(acc_o, tOrP, tOrVt, tOsVt, tiled_mma_o, smem_tiled_copy_V, smem_thr_copy_V);
+        flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
 
         if (Kernel_traits::Share_KV) {
-            tOsVt.data() = tOsVt.data() + (sV_flag ? size(sK) : -size(sK));
             sV_flag = !sV_flag;
         }
     }
@@ -1108,10 +1086,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     cute::copy(gmem_tiled_copy_Oaccum, tOsOaccum, tOrOaccum);
 
     Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDimV>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-    Tensor taccOcO = thr_mma_o.partition_C(caccO);                           // (MMA,MMA_M,MMA_K)
-    static_assert(decltype(size<0>(taccOcO))::value == 4);
-    // Convert to ((2, 2), MMA_M, MMA_K) then take only the row indices.
-    Tensor taccOcO_row = logical_divide(taccOcO, Shape<_2>{})(make_coord(0, _), _, 0);
+    Tensor taccOcO = thr_mma_o.partition_C(caccO);                           // ((MMA=4, X), MMA_M, MMA_K=1)
+    Tensor taccOcO_row = taccOcO(make_coord(0, _, 0), _, 0);
     CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));                     // MMA_M
     if (get<1>(taccOcO_row(0)) == 0) {
         #pragma unroll

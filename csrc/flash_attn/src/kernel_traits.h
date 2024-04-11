@@ -53,7 +53,6 @@ struct Flash_kernel_traits {
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
          int kHeadDimV_=0,
          bool Share_KV_=false,
-         bool gemm_o_patition_N_=false,
          int kNWarpsS_=0,
          bool Blocked_KV_=true,
          typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
@@ -68,7 +67,6 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr bool Share_Q_K_smem = Share_Q_K_smem_;
     static constexpr bool Is_Q_in_regs = Is_Q_in_regs_ || Share_Q_K_smem;
     static constexpr bool Share_KV = Share_KV_;
-    static constexpr bool gemm_o_patition_N = gemm_o_patition_N_;
     static constexpr bool Blocked_KV = Blocked_KV_;
 
     // The number of threads.
@@ -88,32 +86,27 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
 
-    using TiledMma = TiledMMA<
-        typename Base::MMA_Atom_Arch,
-        Layout<Shape<Int<kNWarpsS>,_1,_1>>,  // 4x1x1 or 8x1x1 thread group
-        Tile<Int<16 * kNWarpsS>, _16, _16>>;
+    using TiledMma = decltype(make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>,
+                                   GMMA::Major::K, GMMA::Major::K>(),
+        Layout<Shape<_1, _1, _1>>{}));
 
     static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
-    using TiledMmaO = TiledMMA<
-        typename Base::MMA_Atom_Arch,
-        Layout<Shape<Int<kNWarps / AtomLayoutNO>, Int<AtomLayoutNO>, _1>>,
-        Tile<Int<16 * kNWarps / AtomLayoutNO>, Layout<Shape<_8, _2, Int<AtomLayoutNO>>, Stride<_1, Int<8 * AtomLayoutNO>, _8>>, _16>>;
+    using TiledMmaO = decltype(make_tiled_mma(
+        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
+                                   GMMA::Major::K, GMMA::Major::MN>(),
+        Layout<Shape<_1, Int<AtomLayoutNO>, _1>>{}));
 
-    using SmemLayoutAtomQ = decltype(
-        composition(Swizzle<kSwizzle, 3, 3>{},
-                    // This has to be kBlockKSmem, using kHeadDim gives wrong results for d=128
-                    Layout<Shape<_8, Int<kBlockKSmem>>,
-                           Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutQ = decltype(tile_to_shape(
-        SmemLayoutAtomQ{},
+        GMMA::Layout_K_SW128_Atom<Element>{},
         Shape<Int<kBlockM>, Int<kHeadDim>>{}));
 
     using SmemLayoutK = decltype(tile_to_shape(
-        SmemLayoutAtomQ{},
+        GMMA::Layout_K_SW128_Atom<Element>{},
         Shape<Int<kBlockN>, Int<kHeadDim>>{}));
 
     using SmemLayoutV = decltype(tile_to_shape(
-        SmemLayoutAtomQ{},
+        GMMA::Layout_K_SW128_Atom<Element>{},
         Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;

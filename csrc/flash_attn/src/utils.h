@@ -126,7 +126,7 @@ struct Allreduce {
 
 template<>
 struct Allreduce<2> {
-template<typename T, typename Operator> 
+template<typename T, typename Operator>
 static __device__ __forceinline__ T run(T x, Operator &op) {
     x = op(x, __shfl_xor_sync(uint32_t(-1), x, 1));
     return x;
@@ -160,6 +160,47 @@ __forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB,
         }
         cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename TA, typename LayoutA, typename TB, typename LayoutB,
+        typename TC, typename LayoutC, typename TiledMma>
+__device__ void gemm(TiledMma &tiled_mma,
+                     const Tensor<TA, LayoutA> &tCrA,
+                     const Tensor<TB, LayoutB> &tCrB,
+                     Tensor<TC, LayoutC> &tCrC) {
+    warpgroup_fence_operand(tCrC);
+    warpgroup_arrive();
+
+    cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
+
+    warpgroup_commit_batch();
+    warpgroup_wait<0>();
+    warpgroup_fence_operand(tCrC);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename TA, typename LayoutA, typename TB, typename LayoutB,
+        typename TC, typename LayoutC, typename TiledMma>
+__device__ void gemm_ldbar(TiledMma &tiled_mma,
+                           const Tensor<TA, LayoutA> &tCrA,
+                           const Tensor<TB, LayoutB> &tCrB,
+                           Tensor<TC, LayoutC> &tCrC,
+                           cute::uint64_t &tma_load_mbar, int kPhaseBit) {
+    /// Wait on the shared memory barrier until the phase bit flips from
+    /// kPhaseBit value
+    cute::wait_barrier(tma_load_mbar, kPhaseBit);
+    warpgroup_fence_operand(tCrC);
+    warpgroup_arrive();
+
+    cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
+
+    warpgroup_commit_batch();
+    warpgroup_wait<0>();
+    warpgroup_fence_operand(tCrC);
+    __syncthreads();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -207,6 +248,12 @@ __forceinline__ __device__ auto convert_layout_acc_rowcol(Layout acc_layout) {
     static_assert(decltype(rank(acc_layout))::value == 3);
     auto l = logical_divide(acc_layout, Shape<_2>{});  // ((2, 2), MMA_M, MMA_N)
     return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<2>(l)));
+};
+
+// Convert acc_layout from ((MMA=4, X), MMA_M, MMA_N=1) to (4, MMA_M, X)
+template<typename Layout>
+__forceinline__ __device__ auto convert_gmma_to_mma_tensor(Layout acc_layout) {
+    return make_layout(make_layout(get<0, 0>(acc_layout), get<0, 1>(acc_layout)), get<1>(acc_layout), get<0, 2>(acc_layout));
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
