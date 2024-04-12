@@ -143,7 +143,7 @@ struct Softmax {
 
     __forceinline__ __device__ Softmax() {};
 
-    template<bool Is_first, bool Check_inf=false, typename Tensor0, typename Tensor1>
+    template<bool Is_first, bool Check_inf=false, bool rescale_o=true, typename Tensor0, typename Tensor1>
     __forceinline__ __device__ TensorT softmax_rescale_o(Tensor0 &acc_s, Tensor1 &acc_o, float softmax_scale_log2) {
         // Reshape acc_s from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
@@ -169,8 +169,10 @@ struct Softmax {
                 float scores_scale = exp2f((scores_max_prev(mi) - scores_max_cur) * softmax_scale_log2);
                 scale_o(mi) = scores_scale;
                 row_sum(mi) *= scores_scale;
-                #pragma unroll
-                for (int ni = 0; ni < size<1>(acc_o_rowcol); ++ni) { acc_o_rowcol(mi, ni) *= scores_scale; }
+                if constexpr (rescale_o) {
+                    #pragma unroll
+                    for (int ni = 0; ni < size<1>(acc_o_rowcol); ++ni) { acc_o_rowcol(mi, ni) *= scores_scale; }
+                }
             }
             flash::scale_apply_exp2(scores, row_max, softmax_scale_log2);
             // We don't do the reduce across threads here since we don't need to use the row_sum.

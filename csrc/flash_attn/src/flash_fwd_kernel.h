@@ -907,17 +907,19 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             // We have key_padding_mask so we'll need to Check_inf
             Tensor scale_o = masking_step == 0
-                ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2)
-                : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2);
+                ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local || !Is_even_MN, false>(acc_s, acc_o, params.scale_softmax_log2)
+                : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local || !Is_even_MN, false>(acc_s, acc_o, params.scale_softmax_log2);
             // if (cute::thread0()) { print(scores_max); print(scores_sum); print(scores); }
 
             if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
                 cute::copy(flash::convert_type<Element>(tSrS), tPsP);
                 cute::copy(scale_o, tScale_osScale_o);
+                __syncthreads();
             }
+            flash::rescale_o(acc_o, scale_o);
         }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) { __syncthreads(); }
         if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+            __syncthreads();
             Tensor scale_o = make_tensor<float>(Shape<_2>{});
             cute::copy(tScale_osScale_o, scale_o);
             flash::rescale_o(acc_o, scale_o);
@@ -977,15 +979,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             mask.template apply_mask</*Causal_mask=*/false>(
                 acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarpsS * 16
             );
-            Tensor scale_o = softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2);
+            Tensor scale_o = softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local, false>(acc_s, acc_o, params.scale_softmax_log2);
 
             if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
                 cute::copy(flash::convert_type<Element>(tSrS), tPsP);
                 cute::copy(scale_o, tScale_osScale_o);
+                __syncthreads();
             }
+            flash::rescale_o(acc_o, scale_o);
         }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) { __syncthreads(); }
         if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+            __syncthreads();
             Tensor scale_o = make_tensor<float>(Shape<_2>{});
             cute::copy(tScale_osScale_o, scale_o);
             flash::rescale_o(acc_o, scale_o);
