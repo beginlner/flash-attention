@@ -93,7 +93,7 @@ struct Flash_fwd_kernel_traits : public Base {
 
     static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
     using TiledMmaO = decltype(make_tiled_mma(
-        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
                                    GMMA::Major::K, GMMA::Major::MN>(),
         Layout<Shape<_1, Int<AtomLayoutNO>, _1>>{}));
 
@@ -109,8 +109,10 @@ struct Flash_fwd_kernel_traits : public Base {
         GMMA::Layout_K_SW128_Atom<Element>{},
         Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
-    using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
-    using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>>;
+    using SmemLayoutP = decltype(tile_to_shape(
+        GMMA::Layout_K_SW128_Atom<Element>{},
+        Shape<Int<kBlockM>, Int<kBlockN>>{}));
+    using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<Int<kNThreadsS>, _1>>;
 
     // https://github.com/ColfaxResearch/cutlass-kernels/blob/a222587e6d59b93ba704853d3946fb686d8b8892/src/fmha/fmha_forward.cu#L434
     using SmemLayoutVtransposed = decltype(
