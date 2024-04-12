@@ -902,7 +902,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
 
         if (!Kernel_traits::Share_KV) { LoadK(n_block); }
-        sK_flag = !sK_flag;
+        if (Kernel_traits::Share_KV) { sK_flag = !sK_flag;}
 
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             // We have key_padding_mask so we'll need to Check_inf
@@ -973,7 +973,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
 
         if (!Kernel_traits::Share_KV) { LoadK(n_block); }
-        sK_flag = !sK_flag;
+        if (Kernel_traits::Share_KV) { sK_flag = !sK_flag;}
 
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             mask.template apply_mask</*Causal_mask=*/false>(
