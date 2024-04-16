@@ -109,12 +109,8 @@ struct Flash_fwd_kernel_traits : public Base {
         SmemLayoutAtomQ{},
         Shape<Int<kBlockN>, Int<kHeadDim>>{}));
 
-    using SmemLayoutAtomV = typename std::conditional<kHeadDimV % 64 == 0,
-                                                      GMMA::Layout_K_SW128_Atom<Element>,
-                                                      GMMA::Layout_K_SW64_Atom<Element>>::type;
-
     using SmemLayoutV = decltype(tile_to_shape(
-        SmemLayoutAtomV{},
+        SmemLayoutAtomQ{},
         Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
