@@ -561,6 +561,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
 
     Tensor sP = make_tensor(Kernel_traits::Share_KV ? sK.data() + 2 * size(sK) : sV.data() + size(sV), typename Kernel_traits::SmemLayoutP{});
+    Tensor tPsP = sP(_, tidx % Kernel_traits::kNThreadsS, _, _);
     Tensor sScale_o = make_tensor(recast_ptr<float>(sP.data() + size(sP)), typename Kernel_traits::SmemLayoutRow{});
     Tensor tScale_osScale_o = sScale_o(_, tidx % Kernel_traits::kNThreadsS);
 
@@ -571,7 +572,6 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tSrK2  = thr_mma.partition_fragment_B(sK2);                           // (MMA,MMA_N,MMA_K)
     Tensor tSrS = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_s = make_tensor(tSrS.data(), flash::convert_gmma_to_mma_tensor(tSrS.layout()));  // (4, MMA_M, X)
-    Tensor tPsP = thr_mma.partition_C(sP);
 
     typename Kernel_traits::TiledMmaO tiled_mma_o;
     auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
@@ -579,7 +579,6 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tOrVt2  = thr_mma_o.partition_fragment_B(sVtNoSwizzle2);                // (MMA, MMA_K,MMA_N)
     Tensor tOrO = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_o = make_tensor(tOrO.data(), flash::convert_gmma_to_mma_tensor(tOrO.layout()));  // (4, MMA_M, X)
-    Tensor tOrP = thr_mma_o.partition_fragment_A(sP);
 
     // PREDICATES
     //
@@ -858,6 +857,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (!Kernel_traits::Share_KV) { LoadK(n_block); }
         if (Kernel_traits::Share_KV) { sK_flag = !sK_flag;}
 
+        Tensor rP = make_tensor<Element>(acc_s.layout());
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             // We have key_padding_mask so we'll need to Check_inf
             Tensor scale_o = masking_step == 0
@@ -865,8 +865,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local || !Is_even_MN, false>(acc_s, acc_o, params.scale_softmax_log2);
             // if (cute::thread0()) { print(scores_max); print(scores_sum); print(scores); }
 
+            // Convert acc_s from fp32 to fp16/bf16
+            cute::copy(flash::convert_type<Element>(acc_s), rP);
             if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
-                cute::copy(flash::convert_type<Element>(tSrS), tPsP);
+                cute::copy(rP, tPsP);
                 cute::copy(scale_o, tScale_osScale_o);
                 __syncthreads();
             }
@@ -874,10 +876,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
         if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
             __syncthreads();
+            cute::copy(tPsP, rP);
             Tensor scale_o = make_tensor<float>(Shape<_2>{});
             cute::copy(tScale_osScale_o, scale_o);
             flash::rescale_o(acc_o, scale_o);
         }
+        // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
+        // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
+        Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
         flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
 
@@ -929,14 +935,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (!Kernel_traits::Share_KV) { LoadK(n_block); }
         if (Kernel_traits::Share_KV) { sK_flag = !sK_flag;}
 
+        Tensor rP = make_tensor<Element>(acc_s.layout());
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             mask.template apply_mask</*Causal_mask=*/false>(
                 acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarpsS * 16
             );
             Tensor scale_o = softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local, false>(acc_s, acc_o, params.scale_softmax_log2);
 
+            // Convert acc_s from fp32 to fp16/bf16
+            cute::copy(flash::convert_type<Element>(acc_s), rP);
             if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
-                cute::copy(flash::convert_type<Element>(tSrS), tPsP);
+                cute::copy(rP, tPsP);
                 cute::copy(scale_o, tScale_osScale_o);
                 __syncthreads();
             }
@@ -944,10 +953,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
         if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
             __syncthreads();
+            cute::copy(tPsP, rP);
             Tensor scale_o = make_tensor<float>(Shape<_2>{});
             cute::copy(tScale_osScale_o, scale_o);
             flash::rescale_o(acc_o, scale_o);
         }
+        // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
+        // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
+        Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
         flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
 
