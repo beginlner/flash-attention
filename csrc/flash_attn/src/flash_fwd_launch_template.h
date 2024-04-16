@@ -54,6 +54,8 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int L
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+    static_assert(!Kernel_traits::Is_Q_in_regs, "sm90 implementation does not support Is_Q_in_regs");
+    static_assert(!Kernel_traits::Share_Q_K_smem, "sm90 implementation does not support Share_Q_K_smem");
     constexpr size_t smem_size = Kernel_traits::kSmemSize;
     // printf("smem_size = %d\n", smem_size);
 
@@ -106,12 +108,12 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     dim3 grid(num_m_block, params.num_splits > 1 ? params.num_splits : params.b, params.num_splits > 1 ? params.b * params.h : params.h);
     const bool is_even_MN = params.cu_seqlens_q == nullptr && params.cu_seqlens_k == nullptr && params.seqlen_k % Kernel_traits::kBlockN == 0 && params.seqlen_q % Kernel_traits::kBlockM == 0;
     const bool is_even_K = params.d == Kernel_traits::kHeadDim;
-    constexpr static bool Is_causal = false;  // BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-        constexpr static bool IsEvenMNConst = false;  // BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
+    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
             EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
                 LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
                     BOOL_SWITCH(params.num_splits > 1, Split, [&] {
-                        constexpr static bool Append_KV = false;  // BOOL_SWITCH(params.knew_ptr != nullptr, Append_KV, [&] {
+                        BOOL_SWITCH(params.knew_ptr != nullptr, Append_KV, [&] {
                             ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
                                 // If Append_KV, then we must have seqlen_offsets, which means cu_seqlens_k != nullptr.
                                 // If not IsEvenKConst, we also set IsEvenMNConst to false to reduce number of templates.
@@ -127,9 +129,12 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                 kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
                                 C10_CUDA_KERNEL_LAUNCH_CHECK();
                             });
+                        });
                     });
                 });
             });
+        });
+    });
     if (params.num_splits > 1) {
         // We want kBlockM to be as small as possible for more parallelism.
         // With 128 threads we can load 512 elements at a time, so if headdim is divisible by 128, kBlockM = 4.
@@ -159,7 +164,20 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 
 template<typename T, int Headdim>
 void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream) {
-    run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, false>>(params, stream);
+    constexpr static int kBlockM = 64;  // Fixed for all head dimensions
+    // TD [2023-08-28]: nvcc segfaults for headdim 96 with block size 64 x 256,
+    // and for headdim 192 with block size 64 x 128.
+    // Also for headdim 160 with block size 64 x 128 after the rotary addition.
+    HEADDIMV_INFER_SWITCH((params.d_v == params.d ? 0 : params.d_v), [&] {
+        if constexpr (Headdim == 576 && kHeadDimV == 512) {
+            // Shared KV
+            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, kBlockM, 32, 8, false, false, T, 512, true, 4>>(params, stream);
+            return;
+        }
+        constexpr static int kBlockN = Headdim <= 64 ? 256 : (Headdim <= 128 ? 128 : (Headdim <= 256 ? 64 : 32));
+        if (params.block_table != nullptr) assert(params.page_block_size % kBlockN == 0);
+        run_flash_splitkv_fwd<Flash_fwd_kernel_traits<Headdim, kBlockM, kBlockN, 4, false, false, T, kHeadDimV>>(params, stream);
+    });
 }
 
 template<typename T>

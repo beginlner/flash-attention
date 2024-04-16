@@ -89,24 +89,26 @@ struct Flash_fwd_kernel_traits : public Base {
     using TiledMma = decltype(make_tiled_mma(
         cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>,
                                    GMMA::Major::K, GMMA::Major::K>(),
-        Layout<Shape<_1, _1, _1>>{}));
+        Layout<Shape<Int<kNWarpsS / 4>, _1, _1>>{}));
 
     static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
     using TiledMmaO = decltype(make_tiled_mma(
         cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
                                    GMMA::Major::K, GMMA::Major::MN>(),
-        Layout<Shape<_1, Int<AtomLayoutNO>, _1>>{}));
+        Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
+
+    using SmemLayoutAtomQ = decltype(kHeadDim % 64 == 0 ? GMMA::Layout_K_SW128_Atom<Element>{} : GMMA::Layout_K_SW64_Atom<Element>{});
 
     using SmemLayoutQ = decltype(tile_to_shape(
-        GMMA::Layout_K_SW128_Atom<Element>{},
+        SmemLayoutAtomQ{},
         Shape<Int<kBlockM>, Int<kHeadDim>>{}));
 
     using SmemLayoutK = decltype(tile_to_shape(
-        GMMA::Layout_K_SW128_Atom<Element>{},
+        SmemLayoutAtomQ{},
         Shape<Int<kBlockN>, Int<kHeadDim>>{}));
 
     using SmemLayoutV = decltype(tile_to_shape(
-        GMMA::Layout_K_SW128_Atom<Element>{},
+        SmemLayoutAtomQ{},
         Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutP = decltype(tile_to_shape(
