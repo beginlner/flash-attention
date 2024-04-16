@@ -155,11 +155,12 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
     Tensor tSrS = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_s = make_tensor(tSrS.data(), flash::convert_gmma_to_mma_tensor(tSrS.layout()));  // (4, MMA_M, X)
-    Tensor tOrVt  = thr_mma.partition_fragment_B(sVtNoSwizzle);                // (MMA, MMA_K,MMA_N)
-
     Tensor tSgS  = thr_mma.partition_C(gP);
 
-    Tensor tOrO_mma = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
+    typename Kernel_traits::TiledMmaO tiled_mma_o;
+    auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
+    Tensor tOrVt  = thr_mma_o.partition_fragment_B(sVtNoSwizzle);                // (MMA, MMA_K,MMA_N)
+    Tensor tOrO_mma = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_o = make_tensor(tOrO_mma.data(), flash::convert_gmma_to_mma_tensor(tOrO_mma.layout()));  // (4, MMA_M, X)
 
     //
@@ -300,7 +301,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
         // if (cute::thread0()) { print(tOrP); }
-        flash::gemm(tiled_mma, tOrP, tOrVt, tOrO_mma);
+        flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO_mma);
         // if (cute::thread0()) { print(scores); }
 
         // This check is at the end of the loop since we always have at least 1 iteration
@@ -358,7 +359,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        flash::gemm(tiled_mma, tOrP, tOrVt, tOrO_mma);
+        flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO_mma);
     }
 
     // Epilogue
@@ -369,7 +370,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     Tensor rO = flash::convert_type<Element>(acc_o);
     Tensor sO = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
     // Partition sO to match the accumulator partitioning
-    auto smem_tiled_copy_O = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomO{}, tiled_mma);
+    auto smem_tiled_copy_O = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomO{}, tiled_mma_o);
     auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(tidx);
     Tensor taccOrO = smem_thr_copy_O.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
     Tensor taccOsO = smem_thr_copy_O.partition_D(sO);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
@@ -398,7 +399,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     cute::copy(gmem_tiled_copy_O, tOsO, tOrO);
 
     Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDimV>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-    Tensor taccOcO = thr_mma.partition_C(caccO);                           // ((MMA=4, X), MMA_M, MMA_K=1)
+    Tensor taccOcO = thr_mma_o.partition_C(caccO);                           // ((MMA=4, X), MMA_M, MMA_K=1)
     Tensor taccOcO_row = taccOcO(make_coord(0, _, 0), _, 0);
     CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));                     // MMA_M
     if (get<1>(taccOcO_row(0)) == 0) {

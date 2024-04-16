@@ -171,7 +171,7 @@ void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream)
     HEADDIMV_INFER_SWITCH((params.d_v == params.d ? 0 : params.d_v), [&] {
         if constexpr (Headdim == 576 && kHeadDimV == 512) {
             // Shared KV
-            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, kBlockM, 32, 8, false, false, T, 512, true, 4>>(params, stream);
+            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
             return;
         }
         constexpr static int kBlockN = Headdim <= 64 ? 256 : (Headdim <= 128 ? 128 : (Headdim <= 256 ? 64 : 32));
