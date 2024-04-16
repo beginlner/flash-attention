@@ -567,7 +567,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int batch_size = cu_seqlens_q.numel() - 1;
     int num_heads = sizes[1];
     const int head_size_og = sizes[2];
-    const int head_size_v = v.sizes()[2];
+    const int head_size_v = v.size(-1);
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
     if (head_size_v != head_size_og) {
         TORCH_CHECK(head_size_og == 128 || head_size_og == 192, "head_size_qk must be 192");
