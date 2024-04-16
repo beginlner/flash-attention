@@ -220,7 +220,7 @@ void set_params_dgrad(Flash_bwd_params &params,
 
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
     if (params.d == 576) {
-        run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 576>(params, stream);
+        run_mha_fwd_splitkv_dispatch<cutlass::half_t, 576>(params, stream);
     } else {
         assert(false);
     }
@@ -706,6 +706,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         params.k_batch_stride = k_padded.stride(0);
         params.v_batch_stride = v_padded.stride(0);
     }
+    params.num_blocks = num_blocks;
     params.page_block_size = page_block_size;
     if (seqlenq_ngroups_swapped) {
         // Only apply split-k for decoding
@@ -1461,6 +1462,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         params.block_table = block_table.data_ptr<int>();
         params.block_table_batch_stride = block_table.stride(0);
     }
+    params.num_blocks = num_blocks;
     params.page_block_size = page_block_size;
 
 

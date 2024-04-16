@@ -9,6 +9,7 @@
 #endif
 
 #include <ATen/cuda/CUDAContext.h>
+#include <cutlass/cluster_launch.hpp>
 
 #include "static_switch.h"
 #include "flash.h"
@@ -39,12 +40,17 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_kernel, bool Is_dropout, bool Is_causal, b
     #endif
 }
 
-DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_kernel, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV) {
-    #if defined(ARCH_SUPPORTS_FLASH)
-        flash::compute_attn_splitkv<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params);
-    #else
-        FLASH_UNSUPPORTED_ARCH
-    #endif
+//DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_kernel, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV) {
+//    #if defined(ARCH_SUPPORTS_FLASH)
+//        flash::compute_attn_splitkv<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params);
+//    #else
+//        FLASH_UNSUPPORTED_ARCH
+//    #endif
+//}
+
+template<typename Kernel_traits, typename TmaK, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV>
+__global__ void flash_fwd_splitkv_kernel(CUTE_GRID_CONSTANT const Flash_fwd_params params, CUTE_GRID_CONSTANT const TmaK tmaK) {
+    flash::compute_attn_splitkv<Kernel_traits, TmaK, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, tmaK);
 }
 
 DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int Log_max_splits, bool Is_even_K) {
@@ -99,6 +105,15 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 
 template<typename Kernel_traits>
 void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+    assert(params.page_block_size % Kernel_traits::kBlockN == 0);
+    Tensor gK = make_tensor(reinterpret_cast<typename Kernel_traits::Element const *>(params.k_ptr),
+                            make_shape(params.page_block_size, params.d, params.h_k, params.num_blocks),
+                            make_stride(params.k_row_stride, 1, params.k_head_stride, params.k_batch_stride));
+    auto tmaK = make_tma_copy(SM90_TMA_LOAD_MULTICAST{},
+                              gK,
+                              typename Kernel_traits::SmemLayoutK{},
+                              Shape<Int<Kernel_traits::kBlockN>, Int<Kernel_traits::kHeadDim>>{},
+                              size<0>(typename Kernel_traits::ClusterShape{}));
     static_assert(!Kernel_traits::Is_Q_in_regs, "SplitKV implementation does not support Is_Q_in_regs");
     static_assert(!Kernel_traits::Share_Q_K_smem, "SplitKV implementation does not support Share_Q_K_smem");
     size_t smem_size = Kernel_traits::kSmemSize;
@@ -116,7 +131,7 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                 // If Append_KV, then we must have seqlen_offsets, which means cu_seqlens_k != nullptr.
                                 // If not IsEvenKConst, we also set IsEvenMNConst to false to reduce number of templates.
                                 // If Is_local, set Is_causal to false
-                                auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Split, Append_KV>;
+                                auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, decltype(tmaK), Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Split, Append_KV>;
                                 // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, true, Split, Append_KV>;
                                 // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, IsEvenKConst>;
                                 if (Split) smem_size = std::max(smem_size, size(typename Kernel_traits::SmemLayoutO{}) * sizeof(typename Kernel_traits::ElementAccum));
@@ -124,7 +139,8 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                     C10_CUDA_CHECK(cudaFuncSetAttribute(
                                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                                 }
-                                kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
+                                cutlass::ClusterLaunchParams launch_params{grid, Kernel_traits::kNThreads, {size<0>(typename Kernel_traits::ClusterShape{}), 1, 1}, int(smem_size), stream};
+                                cutlass::launch_kernel_on_cluster(launch_params, (const void *)kernel, params, tmaK);
                                 C10_CUDA_KERNEL_LAUNCH_CHECK();
                             });
                     });
@@ -159,7 +175,7 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 
 template<typename T, int Headdim>
 void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream) {
-    run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, false>>(params, stream);
+    run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, 1, true>>(params, stream);
 }
 
 template<typename T>

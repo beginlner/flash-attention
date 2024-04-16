@@ -9,6 +9,7 @@
 #endif
 
 #include "cute/algorithm/copy.hpp"
+#include "cute/arch/cluster_sm90.hpp"
 
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/layout.h"
@@ -54,6 +55,7 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_r
          int kHeadDimV_=0,
          bool Share_KV_=false,
          int kNWarpsS_=0,
+         int ClusterSize=1,
          bool Blocked_KV_=true,
          typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_fwd_kernel_traits : public Base {
@@ -75,6 +77,7 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kNWarpsS = kNWarpsS_ == 0 ? kNWarps : kNWarpsS_;
     static constexpr int kNThreadsS = kNWarpsS * 32;
     static_assert(kNThreads % kNThreadsS == 0);
+    using ClusterShape = Shape<Int<ClusterSize>, _1, _1>;
 
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
