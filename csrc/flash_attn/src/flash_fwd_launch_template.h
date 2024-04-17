@@ -28,7 +28,7 @@
 // Use a macro to clean up kernel definitions
 #define DEFINE_FLASH_FORWARD_KERNEL(kernelName, ...) \
 template<typename Kernel_traits, __VA_ARGS__> \
-__global__ void kernelName(KERNEL_PARAM_MODIFIER const Flash_fwd_params params)
+__global__ void __launch_bounds__(256, 1, 1) kernelName(KERNEL_PARAM_MODIFIER const Flash_fwd_params params)
 
 DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_kernel, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax) {
     #if defined(ARCH_SUPPORTS_FLASH)
