@@ -1227,7 +1227,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
 std::vector<at::Tensor>
 mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_heads x head_size
                 const at::Tensor &kcache,            // batch_size_c x seqlen_k x num_heads_k x head_size or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
-                const at::Tensor &vcache,            // batch_size_c x seqlen_k x num_heads_k x head_size_v or num_blocks x page_block_size x num_heads_k x head_size_v if there's a block_table.
+                c10::optional<const at::Tensor> &vcache_,  // batch_size_c x seqlen_k x num_heads_k x head_size_v or num_blocks x page_block_size x num_heads_k x head_size_v if there's a block_table.
+                const int head_size_v,
                 c10::optional<const at::Tensor> &k_, // batch_size x seqlen_knew x num_heads_k x head_size
                 c10::optional<const at::Tensor> &v_, // batch_size x seqlen_knew x num_heads_k x head_size_v
                 c10::optional<const at::Tensor> &seqlens_k_, // batch_size
@@ -1252,6 +1253,13 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
+
+    at::Tensor vcache;
+    if (vcache_.has_value()) {
+        vcache = vcache_.value();
+    } else {
+        vcache = kcache;
+    }
 
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16,
@@ -1286,7 +1294,6 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     int num_heads = sizes[2];
     const int head_size = sizes[3];
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
-    const int head_size_v = vcache.sizes()[3];
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
     if (head_size_v != head_size) {
         TORCH_CHECK(head_size == 128 || head_size == 192 || head_size == 576, "head_size_qk must be 192 or 576");
@@ -1321,10 +1328,10 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     CHECK_SHAPE(q, batch_size, seqlen_q, num_heads, head_size);
     if (!paged_KV) {
         CHECK_SHAPE(kcache, batch_size_c, seqlen_k, num_heads_k, head_size);
-        CHECK_SHAPE(vcache, batch_size_c, seqlen_k, num_heads_k, head_size_v);
+        if (vcache_.has_value()) { CHECK_SHAPE(vcache, batch_size_c, seqlen_k, num_heads_k, head_size_v); }
     } else {
         CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size);
-        CHECK_SHAPE(vcache, num_blocks, page_block_size, num_heads_k, head_size_v);
+        if (vcache_.has_value()) { CHECK_SHAPE(vcache, num_blocks, page_block_size, num_heads_k, head_size_v); }
         CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
     }
 

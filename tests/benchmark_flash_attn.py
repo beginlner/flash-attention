@@ -31,16 +31,7 @@ def assert_close(x, y, name=""):
 
 
 def timer(func):
-    torch.cuda.synchronize()
-    st = torch.cuda.Event(True)
-    en = torch.cuda.Event(True)
-    st.record()
-    e = 100
-    for _ in range(e):
-        func()
-    en.record()
-    torch.cuda.synchronize()
-    t = st.elapsed_time(en) / e
+    t = triton.testing.do_bench(func)
     FLOPS = b * s * s * h * (d + v_dim) * 6
     bytes = b * s * h * (d + v_dim) * (torch.finfo(dtype).bits // 8)
 

@@ -1200,6 +1200,7 @@ def flash_attn_with_kvcache(
         q,
         k_cache,
         v_cache,
+        v_cache.shape[-1],
         k,
         v,
         cache_seqlens,
@@ -1238,9 +1239,10 @@ def get_kvcache_block_size(head_dim):
 def flash_attn_with_blocked_kvcache(
     q: torch.Tensor,
     k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
+    v_cache: Optional[torch.Tensor],  # None means shared KV
     block_table: torch.Tensor,
     cache_seqlens: torch.Tensor,
+    head_size_v: Optional[int] = None,
     k: Optional[torch.Tensor] = None,
     v: Optional[torch.Tensor] = None,
     rotary_cos: Optional[torch.Tensor] = None,
@@ -1255,10 +1257,14 @@ def flash_attn_with_blocked_kvcache(
 ):
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
+    if head_size_v is None:
+        assert v_cache is not None
+        head_size_v = v_cache.shape[-1]
     out, softmax_lse = flash_attn_cuda.fwd_kvcache(
         q,
         k_cache,
         v_cache,
+        head_size_v,
         k,
         v,
         cache_seqlens,

@@ -31,8 +31,7 @@ def assert_close(x, y, name=""):
 
 
 def timer(func, name=""):
-    with torch.cuda.stream(torch.cuda.Stream()):
-        t = triton.testing.do_bench_cudagraph(func)
+    t = triton.testing.do_bench(func)
     FLOPS = b * s * h_q * (d + v_dim) * 2
     bytes = b * s * h_kv * d * (torch.finfo(dtype).bits // 8)
 
@@ -61,7 +60,7 @@ def test_flash_attention(b, s, h_q, h_kv, d):
     block_table = torch.arange(b * s // block_size, dtype=torch.int32).view(b, s // block_size)
     cache_seqlens = torch.full((b,), s, dtype=torch.int32)
 
-    def blocked_flash_attn(): return flash_attn_with_blocked_kvcache(q, blocked_k, blocked_v, block_table, cache_seqlens, causal=True)
+    def blocked_flash_attn(): return flash_attn_with_blocked_kvcache(q, blocked_k, None, block_table, cache_seqlens, head_size_v=v_dim, causal=True)
 
     def torch_attn(): return scaled_dot_product_attention(q.transpose(1, 2), full_k.transpose(1, 2), full_v.transpose(1, 2)).transpose(1, 2)
 
