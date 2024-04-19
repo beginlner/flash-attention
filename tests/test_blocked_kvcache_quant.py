@@ -5,8 +5,8 @@ from flash_attn.flash_attn_interface import get_kvcache_block_size, flash_attn_w
 
 b, s, h_q, h_kv, d = 132, 4096, 128, 1, 576
 v_dim = 512
-k0_bits, k1_bits = 4, 8
-k0_dtype, k1_dtype = "int4", "int8"
+k0_bits, k1_bits = 4, 16
+k0_dtype, k1_dtype = "int4", "bfloat16"
 split_length = 512
 assert (split_length * k0_bits + (d - split_length) * k1_bits) % 32 == 0
 compressed_head_size = (split_length * k0_bits + (d - split_length) * k1_bits) // 32
@@ -32,7 +32,7 @@ def assert_close(x, y, name=""):
     diff = calc_diff(x, y)
     amax = (x.double() - y.double()).abs().max()
     print(f"{name}: diff {diff}, amax {amax}")
-    assert diff < 2e-5
+    assert diff == 0
 
 
 def timer(func, name=""):
@@ -51,28 +51,23 @@ def scaled_dot_product_attention(query, key, value) -> torch.Tensor:
 
 
 def create_k():
-    # 步骤 1: 创建一个大小为 576 的 tensor，前 512 个元素模拟 int4，后 64 个元素为 int8
-    x_int4 = torch.randint(low=-8, high=8, size=(b, s, h_kv, split_length), dtype=torch.int32)
-    x_int8 = torch.randint(low=-128, high=128, size=(b, s, h_kv, d - split_length), dtype=torch.int32)
-    # x_int4 = torch.ones((b, s, h_kv, split_length), dtype=torch.int32) * 1
-    # x_int8 = torch.ones((b, s, h_kv, d - split_length), dtype=torch.int32) * 1
-    x = torch.cat((x_int4, x_int8), dim=-1)
+    x0 = torch.randint(low=-(1 << (k0_bits - 1)), high=(1 << (k0_bits - 1)), size=(b, s, h_kv, split_length), dtype=torch.int32)
+    if k1_dtype == "bfloat16":
+        x1 = torch.randn((b, s, h_kv, d - split_length), dtype=torch.bfloat16)
+        y1 = x1.view(torch.int16).to(torch.int32)
+    else:
+        x1 = torch.randint(low=-(1 << (k1_bits - 1)), high=(1 << (k1_bits - 1)), size=(b, s, h_kv, d - split_length), dtype=torch.int32)
+        y1 = x1
 
-    # 步骤 2: 将 x 压缩存放到 torch.int32 类型的 tensor 中
-    # 创建一个足够大的 int32 tensor 来存储压缩后的数据
     compressed = torch.zeros(b, s, h_kv, compressed_head_size, dtype=torch.int32)
-
-    # 填充 compressed tensor
-    # 对于 int4，每个 int32 可以存储 8 个 int4 值
     for i in range(0, split_length):
-        compressed[..., i // 8] |= (x[..., i] & 0xF) << (i % 8 * 4)
-
-    # 对于 int8，每个 int32 可以存储 4 个 int8 值
+        compressed[..., i // (32 // k0_bits)] |= (
+            (x0[..., i] & ((1 << k0_bits) - 1)) << (i % (32 // k0_bits) * k0_bits))
     for i in range(split_length, d):
-        compressed[..., split_length // 8 + (i - split_length) // 4] |= (x[..., i] & 0xFF) << (i % 4 * 8)
+        compressed[..., split_length // (32 // k0_bits) + (i - split_length) // (32 // k1_bits)] |= (
+            (y1[..., i - split_length] & ((1 << k1_bits) - 1)) << (i % (32 // k1_bits) * k1_bits))
 
-    # 步骤 3: 将压缩后的 tensor 转换回大小为 576 的 float 类型的 tensor
-    decompressed = x.bfloat16()
+    decompressed = torch.cat((x0.bfloat16(), x1.bfloat16()), dim=-1)
 
     return compressed, decompressed
 
