@@ -152,6 +152,18 @@
       using quant_type0 = cutlass::int4b_t;         \
       using quant_type1 = int8_t;                   \
       return __VA_ARGS__();                         \
+    } else if (TYPE == 2) {                         \
+      using quant_type0 = cutlass::int4b_t;         \
+      using quant_type1 = cutlass::bfloat16_t;      \
+      return __VA_ARGS__();                         \
+    } else if (TYPE == 3) {                         \
+      using quant_type0 = int8_t;                   \
+      using quant_type1 = int8_t;                   \
+      return __VA_ARGS__();                         \
+    } else if (TYPE == 4) {                         \
+      using quant_type0 = int8_t;                   \
+      using quant_type1 = cutlass::bfloat16_t;      \
+      return __VA_ARGS__();                         \
     } else {                                        \
       assert(                                       \
         false and "Unsupported TYPE");              \

@@ -1242,11 +1242,18 @@ def get_kvcache_block_size(head_dim):
 def convert_kvcahe_quantization_type(
     kvcahe_quantization_dtypes: Optional[Tuple[str, str]],
 ) -> int:
+    # This should match KVCACHE_QUANTIZATION_TYPE_SWITCH in static_switch.h
     if kvcahe_quantization_dtypes is None:
         return 0
     dtype0, dtype1 = kvcahe_quantization_dtypes
     if dtype0 == "int4" and dtype1 == "int8":
         return 1
+    if dtype0 == "int4" and dtype1 == "bfloat16":
+        return 2
+    if dtype0 == "int8" and dtype1 == "int8":
+        return 3
+    if dtype0 == "int8" and dtype1 == "bfloat16":
+        return 4
     raise ValueError(f"Unsupported kvcahe_quantization_dtypes: {kvcahe_quantization_dtypes}")
 
 
