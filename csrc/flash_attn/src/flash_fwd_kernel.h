@@ -579,10 +579,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     typename Kernel_traits::GmemTiledCopyKQuant0 gmem_tiled_copy_KQuant0;
     auto gmem_thr_copy_KQuant0 = gmem_tiled_copy_KQuant0.get_thread_slice(tidx);
     Tensor tKQuant0gKQuant0 = gmem_thr_copy_KQuant0.partition_S(gKQuant0);
+    Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
+    Tensor tKQuant0rKQuant0_high = make_tensor<Element>(tKQuant0rKQuant0.layout());
     typename Kernel_traits::GmemTiledCopyKQuant1 gmem_tiled_copy_KQuant1;
     auto gmem_thr_copy_KQuant1 = gmem_tiled_copy_KQuant1.get_thread_slice(tidx);
     Tensor tKQuant1gKQuant1 = gmem_thr_copy_KQuant1.partition_S(gKQuant1);
     typename Kernel_traits::SmemTiledCopyK smem_tiled_copy_K;
+    Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
+    Tensor tKQuant1rKQuant1_high = make_tensor<Element>(tKQuant1rKQuant1.layout());
 
     Tensor sP = make_tensor(Kernel_traits::Share_KV ? sK.data() + 2 * size(sK) : sV.data() + size(sV), typename Kernel_traits::SmemLayoutP{});
     Tensor tPsP = sP(_, tidx % Kernel_traits::kNThreadsS, _, _);
@@ -777,27 +781,49 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         }
     }
 
+    auto LDG_K = [&] (const int n) {
+        #pragma unroll
+        for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
+            copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, n, k), tKQuant0rKQuant0(_, n, k));
+        }
+        #pragma unroll
+        for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+            copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKQuant1rKQuant1(_, n, k));
+        }
+    };
+    auto Cast_K = [&] (const int n) {
+        #pragma unroll
+        for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
+            convert_type_out(tKQuant0rKQuant0(_, n, k), tKQuant0rKQuant0_high(_, n, k));
+        }
+        #pragma unroll
+        for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+            convert_type_out(tKQuant1rKQuant1(_, n, k), tKQuant1rKQuant1_high(_, n, k));
+        }
+    };
+    auto STS_K = [&] (const int n) {
+        #pragma unroll
+        for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
+            copy(smem_tiled_copy_K, tKQuant0rKQuant0_high(_, n, k), tKsK(_, n, k));
+        }
+        #pragma unroll
+        for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+            copy(smem_tiled_copy_K, tKQuant1rKQuant1_high(_, n, k), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
+        }
+    };
+
     int n_block = n_block_max - 1;
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
     if (Kernel_traits::SplitLength == 0) {
         flash::copy<Is_even_MN, Is_even_K, Kernel_traits::Share_KV>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV,
                                                                     binfo.actual_seqlen_k - n_block * kBlockN);
     } else {
-        Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
-        Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
         #pragma unroll
         for (int n = 0; n < size<1>(tKsK); ++n) {
             if (Is_even_MN || get<0>(tKVcKV(0, n, 0)) < binfo.actual_seqlen_k - n_block * kBlockN) {
-                #pragma unroll
-                for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
-                    copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, n, k), tKQuant0rKQuant0(_, n, k));
-                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant0rKQuant0(_, n, k)), tKsK(_, n, k));
-                }
-                #pragma unroll
-                for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
-                    copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKQuant1rKQuant1(_, n, k));
-                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant1rKQuant1(_, n, k)), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
-                }
+                LDG_K(n);
+                Cast_K(n);
+                STS_K(n);
             } else {
                 clear(tKsK(_, n, _));
             }
@@ -854,19 +880,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 // isn't right and we get race conditions.
                 cute::cp_async_fence();
             } else {
-                Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
-                Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
                 #pragma unroll
-                for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
-                    copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, _, k), tKQuant0rKQuant0(_, _, k));
-                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant0rKQuant0(_, _, k)), tKsK(_, _, k));
+                for (int n = 0; n < size<1>(tKsK); ++n) {
+                    LDG_K(n);
                 }
-                #pragma unroll
-                for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
-                    copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, _, k), tKQuant1rKQuant1(_, _, k));
-                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant1rKQuant1(_, _, k)), tKsK(_, _, size<2>(tKQuant0gKQuant0) + k));
-                }
-                __syncthreads();
             }
         }
     };
@@ -955,6 +972,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
+        if (Kernel_traits::SplitLength > 0 && n_block > n_block_min) {
+            #pragma unroll
+            for (int n = 0; n < size<1>(tKsK); ++n) {
+                Cast_K(n);
+            }
+            #pragma unroll
+            for (int n = 0; n < size<1>(tKsK); ++n) {
+                STS_K(n);
+            }
+        }
+
         flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
 
         if (Kernel_traits::Share_KV) {
@@ -1033,6 +1061,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
+
+        if (Kernel_traits::SplitLength > 0 && n_block > n_block_min) {
+            #pragma unroll
+            for (int n = 0; n < size<1>(tKsK); ++n) {
+                Cast_K(n);
+            }
+            #pragma unroll
+            for (int n = 0; n < size<1>(tKsK); ++n) {
+                STS_K(n);
+            }
+        }
 
         flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
 
