@@ -3,7 +3,7 @@ import triton
 import torch
 from flash_attn.flash_attn_interface import get_kvcache_block_size, flash_attn_with_blocked_kvcache
 
-b, s, h_q, h_kv, d = 1, 128, 64, 1, 576
+b, s, h_q, h_kv, d = 132, 4096, 128, 1, 576
 v_dim = 512
 k0_bits, k1_bits = 4, 8
 k0_dtype, k1_dtype = "int4", "int8"
@@ -12,7 +12,7 @@ assert (split_length * k0_bits + (d - split_length) * k1_bits) % 32 == 0
 compressed_head_size = (split_length * k0_bits + (d - split_length) * k1_bits) // 32
 block_size = get_kvcache_block_size(d)
 dtype = torch.bfloat16
-device = torch.device("cuda:3")
+device = torch.device("cuda:7")
 torch.set_default_dtype(dtype)
 torch.set_default_device(device)
 torch.cuda.set_device(device)
@@ -32,7 +32,6 @@ def assert_close(x, y, name=""):
     diff = calc_diff(x, y)
     amax = (x.double() - y.double()).abs().max()
     print(f"{name}: diff {diff}, amax {amax}")
-    # print((x.double() - y.double()).tolist())
     assert diff < 2e-5
 
 
@@ -87,7 +86,6 @@ def test_flash_attention():
     compressed_k, k = create_k()
     compressed_blocked_k = compressed_k.view(-1, block_size, h_kv, compressed_head_size)
     blocked_k = k.view(-1, block_size, h_kv, d)
-    print(blocked_k.tolist())
     block_table = torch.arange(b * s // block_size, dtype=torch.int32).view(b, s // block_size)
     cache_seqlens = torch.full((b,), s, dtype=torch.int32)
 
@@ -95,7 +93,6 @@ def test_flash_attention():
         return flash_attn_with_blocked_kvcache(
             q, compressed_blocked_k, None, block_table, cache_seqlens, head_size_v=v_dim, causal=True,
             kvcahe_quantization_dtypes=(k0_dtype, k1_dtype), kvcahe_quantization_split_length=split_length,
-            num_splits=1,
         )
 
     def blocked_flash_attn():
