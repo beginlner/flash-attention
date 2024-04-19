@@ -55,6 +55,7 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_r
          bool Share_KV_=false,
          int kNWarpsS_=0,
          bool Blocked_KV_=true,
+         int SplitLength_=0, typename KV_type0_=cutlass::half_t, typename KV_type1_=cutlass::half_t,
          typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_fwd_kernel_traits : public Base {
     using Element = typename Base::Element;
@@ -160,6 +161,23 @@ struct Flash_fwd_kernel_traits : public Base {
         make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
                         GmemLayoutAtom{},
                         Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
+
+    static constexpr int SplitLength = SplitLength_;
+    static_assert(SplitLength % kBlockKSmem == 0);
+    using KV_type0 = std::conditional_t<(SplitLength > 0), KV_type0_, Element>;
+    using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;;
+    using GmemTiledCopyKQuant0 = decltype(
+        make_tiled_copy(Copy_Atom<DefaultCopy, KV_type0>{},
+                        GmemLayoutAtom{},
+                        Layout<Shape<_1, _8>>{}));
+    using GmemTiledCopyKQuant1 = decltype(
+        make_tiled_copy(Copy_Atom<DefaultCopy, KV_type1>{},
+                        GmemLayoutAtom{},
+                        Layout<Shape<_1, _8>>{}));
+    using SmemTiledCopyK = decltype(
+    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+                    GmemLayoutAtom{},
+                    Layout<Shape<_1, _8>>{}));
 
     using GmemLayoutAtomO = Layout<Shape <Int<kNThreadsS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
                                    Stride<Int<kGmemThreadsPerRow>, _1>>;

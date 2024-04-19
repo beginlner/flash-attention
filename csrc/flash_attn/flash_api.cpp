@@ -9,6 +9,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cutlass/numeric_types.h>
+#include <cute/numeric/int.hpp>
 
 #include "flash.h"
 #include "static_switch.h"
@@ -1229,6 +1230,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                 const at::Tensor &kcache,            // batch_size_c x seqlen_k x num_heads_k x head_size or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                 c10::optional<const at::Tensor> &vcache_,  // batch_size_c x seqlen_k x num_heads_k x head_size_v or num_blocks x page_block_size x num_heads_k x head_size_v if there's a block_table.
                 const int head_size_v,
+                const int kvcache_quantization_type,  // 0 for no quantization; 1 for int4 + int8
+                const int kvcache_quantization_split_length,
                 c10::optional<const at::Tensor> &k_, // batch_size x seqlen_knew x num_heads_k x head_size
                 c10::optional<const at::Tensor> &v_, // batch_size x seqlen_knew x num_heads_k x head_size_v
                 c10::optional<const at::Tensor> &seqlens_k_, // batch_size
@@ -1267,8 +1270,11 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     if (q_dtype == torch::kBFloat16) {
         TORCH_CHECK(is_sm90 || is_sm8x, "bfloat16 is only supported on Ampere GPUs or newer");
     }
-    TORCH_CHECK(kcache.dtype() == q_dtype, "query and key must have the same dtype");
-    TORCH_CHECK(vcache.dtype() == q_dtype, "query and value must have the same dtype");
+    if (kvcache_quantization_type == 0) {
+        TORCH_CHECK(kcache.dtype() == q_dtype, "query and key must have the same dtype");
+        TORCH_CHECK(vcache.dtype() == q_dtype, "query and value must have the same dtype");
+        assert(kvcache_quantization_split_length == 0);
+    }
 
     CHECK_DEVICE(q); CHECK_DEVICE(kcache); CHECK_DEVICE(vcache);
 
@@ -1325,12 +1331,23 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     if (window_size_left >= seqlen_k) { window_size_left = -1; }
     if (window_size_right >= seqlen_k) { window_size_right = -1; }
 
+    int head_size_k = head_size;
+    if (kvcache_quantization_type > 0) {
+        assert(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
+        TORCH_CHECK(kcache.dtype() == torch::kInt32, "kcache must have dtype torch.int32 in quantization.");
+        KVCACHE_QUANTIZATION_TYPE_SWITCH(kvcache_quantization_type, [&] {
+            head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
+                    (head_size - kvcache_quantization_split_length) * cute::sizeof_bits<quant_type1>::value) / 32;
+        });
+        TORCH_CHECK(!vcache_.has_value(), "Only support shared KV in quantization.");
+    }
+
     CHECK_SHAPE(q, batch_size, seqlen_q, num_heads, head_size);
     if (!paged_KV) {
-        CHECK_SHAPE(kcache, batch_size_c, seqlen_k, num_heads_k, head_size);
+        CHECK_SHAPE(kcache, batch_size_c, seqlen_k, num_heads_k, head_size_k);
         if (vcache_.has_value()) { CHECK_SHAPE(vcache, batch_size_c, seqlen_k, num_heads_k, head_size_v); }
     } else {
-        CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size);
+        CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size_k);
         if (vcache_.has_value()) { CHECK_SHAPE(vcache, num_blocks, page_block_size, num_heads_k, head_size_v); }
         CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
     }
@@ -1380,6 +1397,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                      window_size_left,
                      window_size_right);
     params.d_v = head_size_v;
+    params.kvcache_quantization_type = kvcache_quantization_type;
+    params.kvcache_quantization_split_length = kvcache_quantization_split_length;
 
     at::Tensor k, v;
     if (k_.has_value()) {

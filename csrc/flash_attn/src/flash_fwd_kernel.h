@@ -561,6 +561,29 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
     Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
 
+    using KV_type0 = typename Kernel_traits::KV_type0;
+    using KV_type1 = typename Kernel_traits::KV_type1;
+    constexpr int KV_type0_bits = sizeof_bits<KV_type0>::value;
+    constexpr int KV_type1_bits = sizeof_bits<KV_type1>::value;
+    assert(params.k_row_stride * 32 % KV_type0_bits == 0);
+    const int64_t kquant0_row_stride = params.k_row_stride * 32 / KV_type0_bits;
+    Tensor gKQuant0 = make_tensor(make_gmem_ptr(recast_ptr<KV_type0>(recast_ptr<int32_t>(params.k_ptr) + row_offset_k)),
+                                  Shape<Int<kBlockN>, Int<Kernel_traits::SplitLength>>{},
+                                  make_stride(kquant0_row_stride, _1{}));
+    static_assert(Kernel_traits::SplitLength * KV_type0_bits % 32 == 0);
+    assert(params.k_row_stride * 32 % KV_type1_bits == 0);
+    const int64_t kquant1_row_stride = params.k_row_stride * 32 / KV_type1_bits;
+    Tensor gKQuant1 = make_tensor(make_gmem_ptr(recast_ptr<KV_type1>(recast_ptr<int32_t>(params.k_ptr) + row_offset_k + Kernel_traits::SplitLength * KV_type0_bits / 32)),
+                                  Shape<Int<kBlockN>, Int<kHeadDim - Kernel_traits::SplitLength>>{},
+                                  make_stride(kquant1_row_stride, _1{}));
+    typename Kernel_traits::GmemTiledCopyKQuant0 gmem_tiled_copy_KQuant0;
+    auto gmem_thr_copy_KQuant0 = gmem_tiled_copy_KQuant0.get_thread_slice(tidx);
+    Tensor tKQuant0gKQuant0 = gmem_thr_copy_KQuant0.partition_S(gKQuant0);
+    typename Kernel_traits::GmemTiledCopyKQuant1 gmem_tiled_copy_KQuant1;
+    auto gmem_thr_copy_KQuant1 = gmem_tiled_copy_KQuant1.get_thread_slice(tidx);
+    Tensor tKQuant1gKQuant1 = gmem_thr_copy_KQuant1.partition_S(gKQuant1);
+    typename Kernel_traits::SmemTiledCopyK smem_tiled_copy_K;
+
     Tensor sP = make_tensor(Kernel_traits::Share_KV ? sK.data() + 2 * size(sK) : sV.data() + size(sV), typename Kernel_traits::SmemLayoutP{});
     Tensor tPsP = sP(_, tidx % Kernel_traits::kNThreadsS, _, _);
     Tensor sScale_o = make_tensor(recast_ptr<float>(sP.data() + size(sP)), typename Kernel_traits::SmemLayoutRow{});
@@ -756,8 +779,30 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     int n_block = n_block_max - 1;
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
-    flash::copy<Is_even_MN, Is_even_K, Kernel_traits::Share_KV>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV,
-                                                                binfo.actual_seqlen_k - n_block * kBlockN);
+    if (Kernel_traits::SplitLength == 0) {
+        flash::copy<Is_even_MN, Is_even_K, Kernel_traits::Share_KV>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV,
+                                                                    binfo.actual_seqlen_k - n_block * kBlockN);
+    } else {
+        Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
+        Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
+        #pragma unroll
+        for (int n = 0; n < size<1>(tKsK); ++n) {
+            if (Is_even_MN || get<0>(tKVcKV(0, n, 0)) < binfo.actual_seqlen_k - n_block * kBlockN) {
+                #pragma unroll
+                for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
+                    copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, n, k), tKQuant0rKQuant0(_, n, k));
+                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant0rKQuant0(_, n, k)), tKsK(_, n, k));
+                }
+                #pragma unroll
+                for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+                    copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKQuant1rKQuant1(_, n, k));
+                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant1rKQuant1(_, n, k)), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
+                }
+            } else {
+                clear(tKsK(_, n, _));
+            }
+        }
+    }
     cute::cp_async_fence();
 
     // flash::cp_async_wait<0>();
@@ -786,21 +831,43 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (n_block > n_block_min) {
             // Advance gK
             if (!Kernel_traits::Blocked_KV) {
-                tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
+                const int offset = -int(kBlockN * params.k_row_stride);
+                tKgK.data() = tKgK.data() + offset;
+                tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset);
+                tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset);
             } else {
                 const int block_table_idx_cur = n_block * kBlockN / params.page_block_size;
                 const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size;
                 const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size;
                 const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size;
-                tKgK.data() = tKgK.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
+                const int offset = (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
+                tKgK.data() = tKgK.data() + offset;
+                tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset);
+                tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset);
             }
             if (Kernel_traits::Share_KV) {
                 tKsK.data() = tKsK.data() + (sK_flag ? size(sK) : -size(sK));
             }
-            flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
-            // This cp_async_fence needs to be in the if block, otherwise the synchronization
-            // isn't right and we get race conditions.
-            cute::cp_async_fence();
+            if (Kernel_traits::SplitLength == 0) {
+                flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
+                // This cp_async_fence needs to be in the if block, otherwise the synchronization
+                // isn't right and we get race conditions.
+                cute::cp_async_fence();
+            } else {
+                Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
+                Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
+                #pragma unroll
+                for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
+                    copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, _, k), tKQuant0rKQuant0(_, _, k));
+                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant0rKQuant0(_, _, k)), tKsK(_, _, k));
+                }
+                #pragma unroll
+                for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+                    copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, _, k), tKQuant1rKQuant1(_, _, k));
+                    copy(smem_tiled_copy_K, flash::convert_type<Element>(tKQuant1rKQuant1(_, _, k)), tKsK(_, _, size<2>(tKQuant0gKQuant0) + k));
+                }
+                __syncthreads();
+            }
         }
     };
 
@@ -812,7 +879,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             clear(tSrS);
         }
-        flash::cp_async_wait<0>();
+        if (Kernel_traits::SplitLength == 0 || masking_step == 0) {
+            flash::cp_async_wait<0>();
+        }
         __syncthreads();
 
         if (!Kernel_traits::Share_KV) {
@@ -904,7 +973,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             clear(tSrS);
         }
-        flash::cp_async_wait<0>();
+        if (Kernel_traits::SplitLength == 0) {
+            flash::cp_async_wait<0>();
+        }
         __syncthreads();
 
         if (!Kernel_traits::Share_KV) {

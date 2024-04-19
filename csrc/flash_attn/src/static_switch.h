@@ -145,3 +145,26 @@
         false and "Unsupported HeadDimV"); \
     }                                      \
   }()
+
+#define KVCACHE_QUANTIZATION_TYPE_SWITCH(TYPE, ...) \
+  [&] {                                             \
+    if (TYPE == 1) {                                \
+      using quant_type0 = cutlass::int4b_t;         \
+      using quant_type1 = int8_t;                   \
+      return __VA_ARGS__();                         \
+    } else {                                        \
+      assert(                                       \
+        false and "Unsupported TYPE");              \
+    }                                               \
+  }()
+
+#define KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(SPLIT_LENGTH, ...) \
+  [&] {                                                             \
+    if (SPLIT_LENGTH == 512) {                                      \
+      constexpr static int SplitLength = 512;                       \
+      return __VA_ARGS__();                                         \
+    } else {                                                        \
+      assert(                                                       \
+        false and "Unsupported SplitLength");                       \
+    }                                                               \
+  }()
