@@ -95,7 +95,7 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream) 
     constexpr int smem_size_dq_dk_dv = Kernel_traits::kSmemSize1colblock;
     // printf("smem_size_dq_dk_dv = %d\n", smem_size_dq_dk_dv);
     BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-        BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
+        EVEN_MN_SWITCH(is_even_MN, IsEvenMNConst, [&] {
             EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
                 LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !params.is_causal, Is_local, [&] {
                     ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {

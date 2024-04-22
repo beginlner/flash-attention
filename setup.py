@@ -83,7 +83,7 @@ def check_if_cuda_home_none(global_option: str) -> None:
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    nvcc_threads = os.getenv("NVCC_THREADS") or "4"
+    nvcc_threads = os.getenv("NVCC_THREADS") or "32"
     return nvcc_extra_args + ["--threads", nvcc_threads]
 
 
@@ -110,6 +110,9 @@ if not SKIP_CUDA_BUILD:
         "-DFLASHATTENTION_DISABLE_DROPOUT",
         "-DFLASHATTENTION_DISABLE_UNEVEN_K",
         "-DFLASHATTENTION_DISABLE_LOCAL",
+        "-DFLASHATTENTION_DISABLE_APPEND_KV",
+        "-DFLASHATTENTION_DISABLE_EVEN_MN",
+        "-DFLASHATTENTION_DISABLE_RETURN_SOFTMAX",
     ]
 
     check_if_cuda_home_none("flash_attn")

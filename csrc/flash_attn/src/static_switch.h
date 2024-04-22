@@ -66,6 +66,39 @@
   #define LOCAL_SWITCH BOOL_SWITCH
 #endif
 
+#ifdef FLASHATTENTION_DISABLE_APPEND_KV
+#define APPEND_KV_SWITCH(COND, CONST_NAME, ...)   \
+  [&] {                                           \
+    assert(!(COND));                                 \
+    constexpr static bool CONST_NAME = false;     \
+    return __VA_ARGS__();                         \
+  }()
+#else
+#define APPEND_KV_SWITCH BOOL_SWITCH
+#endif
+
+#ifdef FLASHATTENTION_DISABLE_EVEN_MN
+#define EVEN_MN_SWITCH(COND, CONST_NAME, ...) \
+  [&] {                                       \
+    assert(!(COND));                          \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
+  }()
+#else
+#define EVEN_MN_SWITCH BOOL_SWITCH
+#endif
+
+#ifdef FLASHATTENTION_DISABLE_RETURN_SOFTMAX
+#define RETURN_SOFTMAX_SWITCH(COND, CONST_NAME, ...) \
+  [&] {                                              \
+    assert(!(COND));                                 \
+    constexpr static bool CONST_NAME = false;        \
+    return __VA_ARGS__();                            \
+  }()
+#else
+#define RETURN_SOFTMAX_SWITCH BOOL_SWITCH
+#endif
+
 #define FP16_SWITCH(COND, ...)               \
   [&] {                                      \
     if (COND) {                              \
