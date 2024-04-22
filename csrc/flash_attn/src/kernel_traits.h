@@ -171,7 +171,7 @@ struct Flash_fwd_kernel_traits : public Base {
                         GmemLayoutAtom{},
                         Layout<Shape<_1, _8>>{}));
     using GmemTiledCopyKQuant1 = decltype(
-        make_tiled_copy(Copy_Atom<DefaultCopy, KV_type1>{},
+        make_tiled_copy(Copy_Atom<std::conditional_t<std::is_same_v<KV_type1, Element>, Gmem_copy_struct, DefaultCopy>, KV_type1>{},
                         GmemLayoutAtom{},
                         Layout<Shape<_1, _8>>{}));
     using SmemTiledCopyK = decltype(

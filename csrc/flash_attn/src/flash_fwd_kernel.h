@@ -786,9 +786,15 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
             copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, n, k), tKQuant0rKQuant0(_, n, k));
         }
-        #pragma unroll
-        for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
-            copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKQuant1rKQuant1(_, n, k));
+        if (std::is_same_v<KV_type1, Element>) {
+            for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+                copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
+            }
+        } else {
+            #pragma unroll
+            for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+                copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKQuant1rKQuant1(_, n, k));
+            }
         }
     };
     auto Cast_K = [&] (const int n) {
@@ -796,9 +802,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
             convert_type_out(tKQuant0rKQuant0(_, n, k), tKQuant0rKQuant0_high(_, n, k));
         }
-        #pragma unroll
-        for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
-            convert_type_out(tKQuant1rKQuant1(_, n, k), tKQuant1rKQuant1_high(_, n, k));
+        if (!std::is_same_v<KV_type1, Element>) {
+            #pragma unroll
+            for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+                convert_type_out(tKQuant1rKQuant1(_, n, k), tKQuant1rKQuant1_high(_, n, k));
+            }
         }
     };
     auto STS_K = [&] (const int n) {
@@ -806,9 +814,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
             copy(smem_tiled_copy_K, tKQuant0rKQuant0_high(_, n, k), tKsK(_, n, k));
         }
-        #pragma unroll
-        for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
-            copy(smem_tiled_copy_K, tKQuant1rKQuant1_high(_, n, k), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
+        if (!std::is_same_v<KV_type1, Element>) {
+            #pragma unroll
+            for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
+                copy(smem_tiled_copy_K, tKQuant1rKQuant1_high(_, n, k), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
+            }
         }
     };
 
@@ -883,6 +893,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 #pragma unroll
                 for (int n = 0; n < size<1>(tKsK); ++n) {
                     LDG_K(n);
+                    if (std::is_same_v<KV_type1, Element>) { cute::cp_async_fence(); }
                 }
             }
         }
@@ -896,7 +907,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             clear(tSrS);
         }
-        if (Kernel_traits::SplitLength == 0 || masking_step == 0) {
+        if (Kernel_traits::SplitLength == 0 || std::is_same_v<KV_type1, Element> || masking_step == 0) {
             flash::cp_async_wait<0>();
         }
         __syncthreads();
@@ -1000,7 +1011,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
             clear(tSrS);
         }
-        if (Kernel_traits::SplitLength == 0) {
+        if (Kernel_traits::SplitLength == 0 || std::is_same_v<KV_type1, Element>) {
             flash::cp_async_wait<0>();
         }
         __syncthreads();
