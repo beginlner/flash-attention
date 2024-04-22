@@ -87,7 +87,7 @@ def test_flash_attention():
     def blocked_quant_flash_attn():
         return flash_attn_with_blocked_kvcache(
             q, compressed_blocked_k, None, block_table, cache_seqlens, head_size_v=v_dim, causal=True,
-            kvcahe_quantization_dtypes=(k0_dtype, k1_dtype), kvcahe_quantization_split_length=split_length,
+            kvcache_quantization_dtypes=(k0_dtype, k1_dtype), kvcache_quantization_split_length=split_length,
         )
 
     def blocked_flash_attn():

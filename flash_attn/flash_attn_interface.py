@@ -1239,13 +1239,13 @@ def get_kvcache_block_size(head_dim):
         raise ValueError(f"Unsupported head_dim: {head_dim}")
 
 
-def convert_kvcahe_quantization_type(
-    kvcahe_quantization_dtypes: Optional[Tuple[str, str]],
+def convert_kvcache_quantization_type(
+    kvcache_quantization_dtypes: Optional[Tuple[str, str]],
 ) -> int:
     # This should match KVCACHE_QUANTIZATION_TYPE_SWITCH in static_switch.h
-    if kvcahe_quantization_dtypes is None:
+    if kvcache_quantization_dtypes is None:
         return 0
-    dtype0, dtype1 = kvcahe_quantization_dtypes
+    dtype0, dtype1 = kvcache_quantization_dtypes
     if dtype0 == "int4" and dtype1 == "int8":
         return 1
     if dtype0 == "int4" and dtype1 == "bfloat16":
@@ -1254,7 +1254,7 @@ def convert_kvcahe_quantization_type(
         return 3
     if dtype0 == "int8" and dtype1 == "bfloat16":
         return 4
-    raise ValueError(f"Unsupported kvcahe_quantization_dtypes: {kvcahe_quantization_dtypes}")
+    raise ValueError(f"Unsupported kvcache_quantization_dtypes: {kvcache_quantization_dtypes}")
 
 
 def flash_attn_with_blocked_kvcache(
@@ -1264,8 +1264,8 @@ def flash_attn_with_blocked_kvcache(
     block_table: torch.Tensor,
     cache_seqlens: torch.Tensor,
     head_size_v: Optional[int] = None,
-    kvcahe_quantization_dtypes: Optional[Tuple[str, str]] = None,
-    kvcahe_quantization_split_length: int = 0,
+    kvcache_quantization_dtypes: Optional[Tuple[str, str]] = None,
+    kvcache_quantization_split_length: int = 0,
     k: Optional[torch.Tensor] = None,
     v: Optional[torch.Tensor] = None,
     rotary_cos: Optional[torch.Tensor] = None,
@@ -1283,14 +1283,14 @@ def flash_attn_with_blocked_kvcache(
     if head_size_v is None:
         assert v_cache is not None
         head_size_v = v_cache.shape[-1]
-    kvcahe_quantization_type = convert_kvcahe_quantization_type(kvcahe_quantization_dtypes)
+    kvcache_quantization_type = convert_kvcache_quantization_type(kvcache_quantization_dtypes)
     out, softmax_lse = flash_attn_cuda.fwd_kvcache(
         q,
         k_cache,
         v_cache,
         head_size_v,
-        kvcahe_quantization_type,
-        kvcahe_quantization_split_length,
+        kvcache_quantization_type,
+        kvcache_quantization_split_length,
         k,
         v,
         cache_seqlens,
