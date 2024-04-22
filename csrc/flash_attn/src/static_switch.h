@@ -208,6 +208,9 @@
     if (SPLIT_LENGTH == 512) {                                      \
       constexpr static int SplitLength = 512;                       \
       return __VA_ARGS__();                                         \
+    } else if (SPLIT_LENGTH == 480) {                               \
+      constexpr static int SplitLength = 480;                       \
+      return __VA_ARGS__();                                         \
     } else {                                                        \
       assert(                                                       \
         false and "Unsupported SplitLength");                       \
