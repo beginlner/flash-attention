@@ -857,7 +857,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (n_block > n_block_min) {
             // Advance gK
             if (!Kernel_traits::Blocked_KV) {
-                const int offset = -int(kBlockN * params.k_row_stride);
+                const index_t offset = -int(kBlockN * params.k_row_stride);
                 tKgK.data() = tKgK.data() + offset;
                 tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset);
                 tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset);
