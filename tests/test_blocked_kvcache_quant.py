@@ -11,6 +11,7 @@ split_length = 512
 assert (split_length * k0_bits + (d - split_length) * k1_bits) % 32 == 0
 compressed_head_size = (split_length * k0_bits + (d - split_length) * k1_bits) // 32
 block_size = get_kvcache_block_size(d)
+s_pad = triton.cdiv(s, block_size) * block_size
 dtype = torch.bfloat16
 device = torch.device("cuda:7")
 torch.set_default_dtype(dtype)
@@ -51,15 +52,15 @@ def scaled_dot_product_attention(query, key, value) -> torch.Tensor:
 
 
 def create_k():
-    x0 = torch.randint(low=-(1 << (k0_bits - 1)), high=(1 << (k0_bits - 1)), size=(b, s, h_kv, split_length), dtype=torch.int32)
+    x0 = torch.randint(low=-(1 << (k0_bits - 1)), high=(1 << (k0_bits - 1)), size=(b, s_pad, h_kv, split_length), dtype=torch.int32)
     if k1_dtype == "bfloat16":
-        x1 = torch.randn((b, s, h_kv, d - split_length), dtype=torch.bfloat16)
+        x1 = torch.randn((b, s_pad, h_kv, d - split_length), dtype=torch.bfloat16)
         y1 = x1.view(torch.int16).to(torch.int32)
     else:
-        x1 = torch.randint(low=-(1 << (k1_bits - 1)), high=(1 << (k1_bits - 1)), size=(b, s, h_kv, d - split_length), dtype=torch.int32)
+        x1 = torch.randint(low=-(1 << (k1_bits - 1)), high=(1 << (k1_bits - 1)), size=(b, s_pad, h_kv, d - split_length), dtype=torch.int32)
         y1 = x1
 
-    compressed = torch.zeros(b, s, h_kv, compressed_head_size, dtype=torch.int32)
+    compressed = torch.zeros(b, s_pad, h_kv, compressed_head_size, dtype=torch.int32)
     for i in range(0, split_length):
         compressed[..., i // (32 // k0_bits)] |= (
             (x0[..., i] & ((1 << k0_bits) - 1)) << (i % (32 // k0_bits) * k0_bits))
@@ -81,7 +82,7 @@ def test_flash_attention():
     compressed_k, k = create_k()
     compressed_blocked_k = compressed_k.view(-1, block_size, h_kv, compressed_head_size)
     blocked_k = k.view(-1, block_size, h_kv, d)
-    block_table = torch.arange(b * s // block_size, dtype=torch.int32).view(b, s // block_size)
+    block_table = torch.arange(b * s_pad // block_size, dtype=torch.int32).view(b, s_pad // block_size)
     cache_seqlens = torch.full((b,), s, dtype=torch.int32)
 
     def blocked_quant_flash_attn():
