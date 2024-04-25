@@ -988,7 +988,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             cute::copy(tPsP, rP);
             cute::copy(tScale_osScale_o, scale_o);
         }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) { flash::rescale_o(acc_o, scale_o); }
+        flash::rescale_o(acc_o, scale_o);
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
@@ -1077,7 +1077,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             cute::copy(tPsP, rP);
             cute::copy(tScale_osScale_o, scale_o);
         }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) { flash::rescale_o(acc_o, scale_o); }
+        flash::rescale_o(acc_o, scale_o);
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
