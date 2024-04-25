@@ -165,20 +165,6 @@
     }                                      \
   }()
 
-#define HEADDIMV_INFER_SWITCH(HEADDIM, ...)\
-  [&] {                                    \
-    if (HEADDIM == 0) {                    \
-      constexpr static int kHeadDimV = 0;  \
-      return __VA_ARGS__();                \
-    } else if (HEADDIM == 512) {           \
-      constexpr static int kHeadDimV = 512;\
-      return __VA_ARGS__();                \
-    } else {                               \
-      assert(                              \
-        false and "Unsupported HeadDimV"); \
-    }                                      \
-  }()
-
 #define KVCACHE_QUANTIZATION_TYPE_SWITCH(TYPE, ...) \
   [&] {                                             \
     if (TYPE == 1) {                                \
