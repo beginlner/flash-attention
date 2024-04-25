@@ -98,9 +98,9 @@ struct Flash_fwd_kernel_traits : public Base {
                                    GMMA::Major::K, GMMA::Major::MN>(),
         Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
 
-    using SmemLayoutAtomQ = typename std::conditional<kHeadDim % 64 == 0,
-                                                      GMMA::Layout_K_SW128_Atom<Element>,
-                                                      GMMA::Layout_K_SW64_Atom<Element>>::type;
+    using SmemLayoutAtomQ = typename std::conditional_t<kHeadDim % 64 == 0 && kHeadDimV % 64 == 0,
+                                                        GMMA::Layout_K_SW128_Atom<Element>,
+                                                        GMMA::Layout_K_SW64_Atom<Element>>;
 
     using SmemLayoutQ = decltype(tile_to_shape(
         SmemLayoutAtomQ{},
