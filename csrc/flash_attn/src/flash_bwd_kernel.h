@@ -229,8 +229,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     Tensor tdPrdO = thr_gmma_dp.partition_fragment_A(sdO);
     Tensor tdPrV = thr_gmma_dp.partition_fragment_B(sV);
 
-    typename Kernel_traits::TiledMmadKV tiled_mma_dkv;
-
     typename Kernel_traits::TiledGMmadK tiled_gmma_dk;
     auto thr_gmma_dk = tiled_gmma_dk.get_thread_slice(tidx);
     Tensor tdKrdSt = thr_gmma_dk.partition_fragment_A(sdStNoSwizzle);
@@ -700,12 +698,14 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     Tensor sdV = make_tensor(sdK.data() + size(sdK), typename Kernel_traits::SmemLayoutdV{}); // (SMEM_N, SMEM_K)
 
     // Partition sdV and sdK to match the accumulator partitioning
-    auto smem_tiled_copy_dKV = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdKV{}, tiled_mma_dkv);
-    auto smem_thr_copy_dKV = smem_tiled_copy_dKV.get_thread_slice(tidx);
-    Tensor taccdKrdK = smem_thr_copy_dKV.retile_S(rdK);       // ((Atom,AtomNum), MMA_N, MMA_N)
-    Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(sdK);   // ((Atom,AtomNum),PIPE_M,PIPE_N)
-    Tensor taccdVrdV = smem_thr_copy_dKV.retile_S(rdV);       // ((Atom,AtomNum), MMA_N, MMA_N)
-    Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(sdV);    // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    auto smem_tiled_copy_dK = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdKV{}, tiled_gmma_dk);
+    auto smem_thr_copy_dK = smem_tiled_copy_dK.get_thread_slice(tidx);
+    auto smem_tiled_copy_dV = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdKV{}, tiled_gmma_dv);
+    auto smem_thr_copy_dV = smem_tiled_copy_dV.get_thread_slice(tidx);
+    Tensor taccdKrdK = smem_thr_copy_dK.retile_S(rdK);       // ((Atom,AtomNum), MMA_N, MMA_N)
+    Tensor taccdKsdK = smem_thr_copy_dK.partition_D(sdK);   // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    Tensor taccdVrdV = smem_thr_copy_dV.retile_S(rdV);       // ((Atom,AtomNum), MMA_N, MMA_N)
+    Tensor taccdVsdV = smem_thr_copy_dV.partition_D(sdV);    // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
     // We need syncthreads here since we're writing to the same location as sK and sV.
     // Without syncthreads, some thread might modify the location of sK while another thread
@@ -713,8 +713,8 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // If Is_last, there's already a __syncthreads() at the end of the loop.
     if (!Is_last) { __syncthreads(); }
 
-    cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
-    cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
+    cute::copy(smem_tiled_copy_dK, taccdKrdK, taccdKsdK);
+    cute::copy(smem_tiled_copy_dK, taccdVrdV, taccdVsdV);
 
     const index_t row_offset_dk = binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
        + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;

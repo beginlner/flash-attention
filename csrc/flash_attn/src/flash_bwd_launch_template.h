@@ -29,7 +29,7 @@
 // Use a macro to clean up kernel definitions
 #define DEFINE_FLASH_BACKWARD_KERNEL(kernelName, ...) \
 template<typename Kernel_traits, __VA_ARGS__> \
-__global__ void kernelName(KERNEL_PARAM_MODIFIER const Flash_bwd_params params)
+__global__ void __launch_bounds__(256, 1, 1) kernelName(KERNEL_PARAM_MODIFIER const Flash_bwd_params params)
 
 DEFINE_FLASH_BACKWARD_KERNEL(flash_bwd_dq_dk_dv_loop_kernel, bool Is_dropout, bool Is_causal, bool Has_alibi, bool Is_even_M, bool Is_even_K) {
     #if defined(ARCH_SUPPORTS_FLASH)
@@ -242,7 +242,11 @@ void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
     bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
     HEADDIMV_SWITCH((params.d_v == params.d ? 0 : params.d_v), [&] {
     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
-        run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 4, 8, 4, false, false, T, kHeadDimV>, Is_dropout>(params, stream);
+        if constexpr (kHeadDimV <= 128) {
+            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 4, 8, 4, false, false, T, kHeadDimV>, Is_dropout>(params, stream);
+        } else {
+            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 4, 4, false, false, T, kHeadDimV>, Is_dropout>(params, stream);
+        }
     });
     });
 }
