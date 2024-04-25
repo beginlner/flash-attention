@@ -223,6 +223,7 @@ struct Flash_bwd_kernel_traits : public Base {
     using SmemCopyAtom = typename Base::SmemCopyAtom;
     using SmemCopyAtomTransposed = typename Base::SmemCopyAtomTransposed;
 
+    static_assert(!Is_V_in_regs_);
     static constexpr bool Is_V_in_regs = Is_V_in_regs_;
     static constexpr bool No_double_buffer = No_double_buffer_;
 
@@ -241,6 +242,9 @@ struct Flash_bwd_kernel_traits : public Base {
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
 
     static constexpr int AtomLayoutMSdP = AtomLayoutMSdP_;
+    static_assert(AtomLayoutMSdP % 4 == 0);
+    static_assert(AtomLayoutNdKV % 4 == 0);
+    static_assert(AtomLayoutMdQ % 4 == 0);
     static_assert(kNWarps % AtomLayoutMSdP == 0);
     static_assert(kNWarps % AtomLayoutNdKV == 0);
     static_assert(kNWarps % AtomLayoutMdQ == 0);
@@ -250,26 +254,51 @@ struct Flash_bwd_kernel_traits : public Base {
         Layout<Shape<Int<AtomLayoutMSdP>, Int<kNWarps / AtomLayoutMSdP>, _1>>,
         Tile<Int<16 * AtomLayoutMSdP>, Int<16 * kNWarps / AtomLayoutMSdP>, _16>>;
 
+    using TiledGMmaS = decltype(make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMSdP / 4)>, Int<kBlockN / (kNWarps / AtomLayoutMSdP)>, Int<kHeadDim>>,
+                                   GMMA::Major::K, GMMA::Major::K>(),
+        Layout<Shape<Int<AtomLayoutMSdP / 4>, Int<kNWarps / AtomLayoutMSdP>, _1>>{}));
+
+    using TiledGMmadP = decltype(make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMSdP / 4)>, Int<kBlockN / (kNWarps / AtomLayoutMSdP)>, Int<kHeadDimV>>,
+                GMMA::Major::K, GMMA::Major::K>(),
+        Layout<Shape<Int<AtomLayoutMSdP / 4>, Int<kNWarps / AtomLayoutMSdP>, _1>>{}));
+
     using TiledMmadKV = TiledMMA<
         typename Base::MMA_Atom_Arch,
         Layout<Shape<Int<AtomLayoutNdKV>, Int<kNWarps / AtomLayoutNdKV>, _1>>,
         Tile<Int<16 * AtomLayoutNdKV>, Int<16 * kNWarps / AtomLayoutNdKV>, _16>>;
+
+    using TiledGMmadK = decltype(make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockN / (AtomLayoutNdKV / 4)>, Int<kHeadDim / (kNWarps / AtomLayoutNdKV)>, Int<kBlockM>>,
+                GMMA::Major::MN, GMMA::Major::MN>(),
+        Layout<Shape<Int<AtomLayoutNdKV / 4>, Int<kNWarps / AtomLayoutNdKV>, _1>>{}));
+
+    using TiledGMmadV = decltype(make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockN / (AtomLayoutNdKV / 4)>, Int<kHeadDimV / (kNWarps / AtomLayoutNdKV)>, Int<kBlockM>>,
+                GMMA::Major::MN, GMMA::Major::MN>(),
+        Layout<Shape<Int<AtomLayoutNdKV / 4>, Int<kNWarps / AtomLayoutNdKV>, _1>>{}));
 
     using TiledMmadQ = TiledMMA<
         typename Base::MMA_Atom_Arch,
         Layout<Shape<Int<AtomLayoutMdQ>, Int<kNWarps / AtomLayoutMdQ>, _1>>,  // 2x4x1 or 4x2x1 thread group
         Tile<Int<16 * AtomLayoutMdQ>, Int<16 * kNWarps / AtomLayoutMdQ>, _16>>;
 
+    using TiledGMmadQ = decltype(make_tiled_mma(
+        cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMdQ / 4)>, Int<kHeadDim / (kNWarps / AtomLayoutMdQ)>, Int<kBlockN>>,
+                GMMA::Major::K, GMMA::Major::MN>(),
+        Layout<Shape<Int<AtomLayoutMdQ / 4>, Int<kNWarps / AtomLayoutMdQ>, _1>>{}));
+
     using SmemLayoutAtomQdO = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
                     Layout<Shape<_8, Int<kBlockKSmem>>,
                            Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutQ = decltype(tile_to_shape(
-        SmemLayoutAtomQdO{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockM>{}, Int<kHeadDim>{})));
 
     using SmemLayoutdO = decltype(tile_to_shape(
-        SmemLayoutAtomQdO{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockM>{}, Int<kHeadDimV>{})));
 
     using SmemLayoutAtomKV = decltype(
@@ -278,12 +307,12 @@ struct Flash_bwd_kernel_traits : public Base {
                            Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutK = decltype(tile_to_shape(
         // SmemLayoutAtomQdO{},
-        SmemLayoutAtomKV{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockN>{}, Int<kHeadDim>{})));
 
     using SmemLayoutV = decltype(tile_to_shape(
         // SmemLayoutAtomQdO{},
-        SmemLayoutAtomKV{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
     using SmemLayoutKtransposed = decltype(
@@ -306,7 +335,7 @@ struct Flash_bwd_kernel_traits : public Base {
                     Layout<Shape<Int<kBlockM>, Int<kPBlockN>>,
                            Stride<Int<kPBlockN>, _1>>{}));
     using SmemLayoutPdS = decltype(tile_to_shape(
-        SmemLayoutAtomPdS{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockM>{}, Int<kBlockN>{})));
     using SmemLayoutPdStransposed = decltype(
         composition(SmemLayoutPdS{}, make_layout(Shape<Int<kBlockN>, Int<kBlockM>>{}, GenRowMajor{})));
@@ -327,11 +356,11 @@ struct Flash_bwd_kernel_traits : public Base {
                     Layout<Shape<_8, Int<kBlockKSmem>>,
                            Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutdK = decltype(tile_to_shape(
-        SmemLayoutAtomdKV{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockN>{}, Int<kHeadDim>{})));
 
     using SmemLayoutdV = decltype(tile_to_shape(
-        SmemLayoutAtomdKV{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
     using SmemCopyAtomdKV = Copy_Atom<DefaultCopy, elem_type>;
@@ -341,7 +370,7 @@ struct Flash_bwd_kernel_traits : public Base {
                     Layout<Shape<_8, Int<kBlockKSmem>>,
                            Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutdQ = decltype(tile_to_shape(
-        SmemLayoutAtomdQ{},
+        GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockM>{}, Int<kHeadDim>{})));
     using SmemCopyAtomdQ = Copy_Atom<DefaultCopy, elem_type>;
 

@@ -221,8 +221,8 @@ inline __device__ void convert_dQ(const Params &params, const int nsplits) {
     typename Kernel_traits::GmemTiledCopydQaccumAtomicAdd gmem_tiled_copy_dQaccum;
     auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(tidx);
 
-    typename Kernel_traits::TiledMmadQ tiled_mma_dq;
-    auto smem_tiled_copy_dQ = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdQ{}, tiled_mma_dq);
+    typename Kernel_traits::TiledGMmadQ tiled_gmma_dq;
+    auto smem_tiled_copy_dQ = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdQ{}, tiled_gmma_dq);
     auto smem_thr_copy_dQ = smem_tiled_copy_dQ.get_thread_slice(tidx);
     Tensor taccdQsdQ = smem_thr_copy_dQ.partition_D(sdQ);  // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
@@ -230,7 +230,8 @@ inline __device__ void convert_dQ(const Params &params, const int nsplits) {
     Tensor tdQgdQ = gmem_thr_copy_dQ.partition_D(gdQ);
     Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_S(gdQaccum);
 
-    Tensor acc_dq = partition_fragment_C(tiled_mma_dq, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_N, MMA_K
+    Tensor tdQrdQ_gmma = partition_fragment_C(tiled_gmma_dq, Shape<Int<kBlockM>, Int<kHeadDim>>{});
+    Tensor acc_dq = make_tensor(tdQrdQ_gmma.data(), flash::convert_gmma_to_mma_tensor(tdQrdQ_gmma.layout()));  // MMA, MMA_N, MMA_K
     CUTE_STATIC_ASSERT_V(size(acc_dq) == size(tdQgdQaccum));
 
     Tensor tdQrdQaccum = make_fragment_like(tdQgdQaccum);

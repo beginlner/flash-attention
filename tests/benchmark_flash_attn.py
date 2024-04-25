@@ -4,7 +4,7 @@ from torch.nn.functional import scaled_dot_product_attention
 
 from flash_attn import flash_attn_varlen_func
 
-b, s, h, d = 1, 4096, 128, 192
+b, s_q, s_k, h, d = 1, 4096, 4096, 128, 192
 v_dim = 128
 dtype = torch.bfloat16
 device = torch.device("cuda:0")
@@ -32,20 +32,21 @@ def assert_close(x, y, name=""):
 
 def timer(func):
     t = triton.testing.do_bench(func)
-    FLOPS = b * s * s * h * (d + v_dim) * 6
-    bytes = b * s * h * (d + v_dim) * (torch.finfo(dtype).bits // 8)
+    FLOPS = b * s_q * s_k * h * (d + v_dim) * 3
+    bytes = b * s_q * h * (d + v_dim) * (torch.finfo(dtype).bits // 8)
 
     print(f"{t} ms, {FLOPS / 10 ** 9 / t} tflops, {bytes / 10 ** 6 / t} GB/s")
     return t
 
 
-def test_flash_attention(b, s, h, d):
-    print(b, h, s, d, v_dim)
+def test_flash_attention():
+    print(b, h, s_q, s_k, d, v_dim)
 
-    q = torch.randn(b, s, h, d)
-    k = torch.randn(b, s, h, d)
-    v = torch.randn(b, s, h, v_dim)
-    cu_seqlens = torch.arange(0, (b + 1) * s, step=s, dtype=torch.int32)
+    q = torch.randn(b, s_q, h, d)
+    k = torch.randn(b, s_k, h, d)
+    v = torch.randn(b, s_k, h, v_dim)
+    cu_seqlens_q = torch.arange(0, (b + 1) * s_q, step=s_q, dtype=torch.int32)
+    cu_seqlens_k = torch.arange(0, (b + 1) * s_k, step=s_k, dtype=torch.int32)
 
     q1 = q.clone().requires_grad_()
     k1 = k.clone().requires_grad_()
@@ -58,7 +59,7 @@ def test_flash_attention(b, s, h, d):
     def flash_attn():
         q1.grad = k1.grad = v1.grad = None
         return flash_attn_varlen_func(
-            q1.view(b * s, h, d), k1.view(b * s, h, d), v1.view(b * s, h, v_dim), cu_seqlens, cu_seqlens, s, s, causal=True).view(b, s, h, v_dim)
+            q1.view(b * s_q, h, d), k1.view(b * s_k, h, d), v1.view(b * s_k, h, v_dim), cu_seqlens_q, cu_seqlens_k, s_q, s_k, causal=True).view(b, s_q, h, v_dim)
 
     def torch_attn():
         q2.grad = k2.grad = v2.grad = None
@@ -76,7 +77,6 @@ def test_flash_attention(b, s, h, d):
     assert_close(k1.grad, k2.grad, "dk")
     assert_close(v1.grad, v2.grad, "dv")
 
-    grad_triton = torch.randn_like(out_flash_attn)
     timer(lambda: flash_attn().backward(grad_triton))
     timer(lambda: flash_attn().backward(grad_triton))
 
@@ -87,4 +87,4 @@ def test_flash_attention(b, s, h, d):
 
 
 if __name__ == "__main__":
-    test_flash_attention(b, s, h, d)
+    test_flash_attention()
