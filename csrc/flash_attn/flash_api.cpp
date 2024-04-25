@@ -1302,7 +1302,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
     if (head_size_v != head_size) {
-        TORCH_CHECK(head_size == 128 || head_size == 192 || head_size == 576, "head_size_qk must be 192 or 576");
+        TORCH_CHECK(head_size == 576, "head_size_qk must be 576");
     }
 
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
