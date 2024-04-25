@@ -227,13 +227,12 @@ __forceinline__ __device__ auto convert_layout_acc_rowcol(Layout acc_layout) {
     return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<2>(l)));
 };
 
-// Convert acc_layout from ((MMA=4, X), MMA_M, MMA_N=1) to (4, MMA_M, X)
+// Convert acc_layout from ((MMA=4, X), MMA_M, MMA_N) to (4, MMA_M, X * MMA_N)
 template<typename Layout>
 __forceinline__ __device__ auto convert_gmma_to_mma_tensor(Layout acc_layout) {
     static_assert(decltype(size<0, 0>(acc_layout))::value == 2);
     static_assert(decltype(size<0, 1>(acc_layout))::value == 2);
-    static_assert(decltype(size<2>(acc_layout))::value == 1);
-    return make_layout(make_layout(get<0, 0>(acc_layout), get<0, 1>(acc_layout)), get<1>(acc_layout), get<0, 2>(acc_layout));
+    return make_layout(make_layout(get<0, 0>(acc_layout), get<0, 1>(acc_layout)), get<1>(acc_layout), make_layout(get<0, 2>(acc_layout), get<2>(acc_layout)));
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
