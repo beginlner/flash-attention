@@ -69,7 +69,7 @@
 #ifdef FLASHATTENTION_DISABLE_APPEND_KV
 #define APPEND_KV_SWITCH(COND, CONST_NAME, ...)   \
   [&] {                                           \
-    assert(!(COND));                                 \
+    TORCH_CHECK(!(COND));                         \
     constexpr static bool CONST_NAME = false;     \
     return __VA_ARGS__();                         \
   }()
@@ -80,7 +80,7 @@
 #ifdef FLASHATTENTION_DISABLE_EVEN_MN
 #define EVEN_MN_SWITCH(COND, CONST_NAME, ...) \
   [&] {                                       \
-    assert(!(COND));                          \
+    TORCH_CHECK(!(COND));                     \
     constexpr static bool CONST_NAME = false; \
     return __VA_ARGS__();                     \
   }()
@@ -91,7 +91,7 @@
 #ifdef FLASHATTENTION_DISABLE_RETURN_SOFTMAX
 #define RETURN_SOFTMAX_SWITCH(COND, CONST_NAME, ...) \
   [&] {                                              \
-    assert(!(COND));                                 \
+    TORCH_CHECK(!(COND));                            \
     constexpr static bool CONST_NAME = false;        \
     return __VA_ARGS__();                            \
   }()
@@ -143,8 +143,8 @@
       constexpr static int kHeadDim = 576; \
       return __VA_ARGS__();                \
     } else {                               \
-      assert(                              \
-        false and "Unsupported HeadDim");  \
+      TORCH_CHECK(                         \
+        false, "Unsupported HeadDim");     \
     }                                      \
   }()
 
@@ -160,8 +160,8 @@
       constexpr static int kHeadDimV = 128;\
       return __VA_ARGS__();                \
     } else {                               \
-      assert(                              \
-        false and "Unsupported HeadDimV"); \
+      TORCH_CHECK(                         \
+        false, "Unsupported HeadDimV");    \
     }                                      \
   }()
 
@@ -184,8 +184,8 @@
       using quant_type1 = cutlass::bfloat16_t;      \
       return __VA_ARGS__();                         \
     } else {                                        \
-      assert(                                       \
-        false and "Unsupported TYPE");              \
+      TORCH_CHECK(                                  \
+        false, "Unsupported TYPE");                 \
     }                                               \
   }()
 
@@ -198,7 +198,7 @@
       constexpr static int SplitLength = 480;                       \
       return __VA_ARGS__();                                         \
     } else {                                                        \
-      assert(                                                       \
-        false and "Unsupported SplitLength");                       \
+      TORCH_CHECK(                                                  \
+        false, "Unsupported SplitLength");                          \
     }                                                               \
   }()

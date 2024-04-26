@@ -224,7 +224,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
         HEADDIM_SWITCH(params.d, [&] {
             if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
                 if (kHeadDim > 256) {
-                    assert(false and "Unsupported HeadDim");
+                    TORCH_CHECK(false, "Unsupported HeadDim");
                     return;
                 }
                 run_mha_fwd_<elem_type, kHeadDim>(params, stream);
@@ -1273,7 +1273,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     if (kvcache_quantization_type == 0) {
         TORCH_CHECK(kcache.dtype() == q_dtype, "query and key must have the same dtype");
         TORCH_CHECK(vcache.dtype() == q_dtype, "query and value must have the same dtype");
-        assert(kvcache_quantization_split_length == 0);
+        TORCH_CHECK(kvcache_quantization_split_length == 0);
     }
 
     CHECK_DEVICE(q); CHECK_DEVICE(kcache); CHECK_DEVICE(vcache);
@@ -1284,7 +1284,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 
     at::Tensor block_table;
     const bool paged_KV = block_table_.has_value();
-    assert(paged_KV && "Only support blocked kvcache");
+    TORCH_CHECK(paged_KV, "Only support blocked kvcache");
     if (paged_KV) {
         TORCH_CHECK(!cache_batch_idx_.has_value(), "Paged KVcache does not support cache_batch_idx");
         block_table = block_table_.value();
@@ -1333,7 +1333,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 
     int head_size_k = head_size;
     if (kvcache_quantization_type > 0) {
-        assert(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
+        TORCH_CHECK(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
         TORCH_CHECK(kcache.dtype() == torch::kInt32, "kcache must have dtype torch.int32 in quantization.");
         KVCACHE_QUANTIZATION_TYPE_SWITCH(kvcache_quantization_type, [&] {
             head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
