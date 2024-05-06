@@ -82,6 +82,8 @@ struct ParamsBase {
 
     bool is_rms_norm;
 
+    float out_scale;
+
     // Multi-CTA workspace in gmem.
     void *workspace;
 

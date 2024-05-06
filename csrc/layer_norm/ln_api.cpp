@@ -116,7 +116,8 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
                                            const int64_t z_numrows,
                                            c10::optional<at::Generator> gen_,
                                            bool residual_in_fp32=false,
-                                           bool is_rms_norm=false
+                                           bool is_rms_norm=false,
+                                           float out_scale=1.0
 ) {
     auto itype = x0.scalar_type();
     auto rtype = residual_.has_value()
@@ -246,6 +247,7 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
     params.inverse_cols = 1.f / float(params.cols);
     params.rowscale_const = rowscale_const;
     params.is_rms_norm = is_rms_norm;
+    params.out_scale = out_scale;
 
     // Query the kernel-specific launch parameters.
     launcher(launch_params, true);
@@ -296,7 +298,8 @@ std::vector<at::Tensor> dropout_add_ln_bwd(const at::Tensor &dz,     // BxSxhidd
                                            const float rowscale_const,
                                            const int64_t x0_numrows,
                                            const bool has_residual,
-                                           bool is_rms_norm=false
+                                           bool is_rms_norm=false,
+                                           float out_scale=1.0
 ) {
 
     auto itype = dz.scalar_type();
@@ -460,6 +463,7 @@ std::vector<at::Tensor> dropout_add_ln_bwd(const at::Tensor &dz,     // BxSxhidd
     params.inverse_cols = 1.f / float(params.cols);
     params.rowscale_const = rowscale_const;
     params.is_rms_norm = is_rms_norm;
+    params.out_scale = out_scale;
 
     if( launch_params.barrier_size > 0 ) {
         // TODO Any way to avoid this?
@@ -833,12 +837,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("x0"), py::arg("residual"), py::arg("gamma"), py::arg("beta_"),
           py::arg("rowscale_"), py::arg("colscale_"), py::arg("x0_subset_"), py::arg("z_subset_"),
           py::arg("dropout_p"), py::arg("epsilon"), py::arg("rowscale_const"), py::arg("z_numrows"),
-          py::arg("gen_"), py::arg("residual_in_fp32")=false, py::arg("is_rms_norm")=false);
+          py::arg("gen_"), py::arg("residual_in_fp32")=false, py::arg("is_rms_norm")=false, py::arg("out_scale")=1.0);
     m.def("dropout_add_ln_bwd", &dropout_add_ln_bwd, "Run Dropout + Add + LayerNorm backward kernel",
           py::arg("dz"), py::arg("dx_"), py::arg("x"), py::arg("x0_"), py::arg("dmask_"), py::arg("mu"),
           py::arg("rsigma"), py::arg("gamma"), py::arg("rowscale_"), py::arg("colscale_"),
           py::arg("x0_subset_"), py::arg("z_subset_"), py::arg("dropout_p"), py::arg("rowscale_const"),
-          py::arg("x0_numrows"), py::arg("has_residual"), py::arg("is_rms_norm")=false);
+          py::arg("x0_numrows"), py::arg("has_residual"), py::arg("is_rms_norm")=false, py::arg("out_scale")=1.0);
     m.def("dropout_add_ln_parallel_residual_fwd", &dropout_add_ln_parallel_residual_fwd, "Run Dropout + Add + LayerNorm parallel residual forward kernel",
           py::arg("x0"), py::arg("x1_"), py::arg("residual"), py::arg("gamma0"), py::arg("beta0_"),
           py::arg("gamma1_"), py::arg("beta1_"), py::arg("dropout_p"), py::arg("epsilon"),

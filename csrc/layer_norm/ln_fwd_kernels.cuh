@@ -181,7 +181,7 @@ void ln_fwd_kernel(FwdParams params) {
                         compute_t y_ij = compute_t(rs * (xf[it * NUM_ELTS + jt] - (!params.is_rms_norm ? mu : 0.f)));
                         compute_t g_ij = gamma[it].data.elt[jt];
                         compute_t b_ij = beta[it].data.elt[jt];
-                        z.data.elt[jt] = output_t(g_ij * y_ij + b_ij);
+                        z.data.elt[jt] = output_t((g_ij * y_ij + b_ij) * params.out_scale);
                     }
                     z.store_to(params.z, idx_z);
                     idx_z += VEC_COLS_PER_LDG;

@@ -126,8 +126,8 @@ void ln_bwd_kernel(layer_norm::BwdParams params) {
                     for( int jt = 0; jt < NUM_ELTS; jt++ ) {
                         compute_t x_tmp = x.data.elt[jt];
                         compute_t y_tmp = rs_r * (x_tmp - (!params.is_rms_norm ? mu_r : 0.f));
-                        compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]) * compute_t(dz.data.elt[jt]);
-                        compute_t dz_tmp = dz.data.elt[jt];
+                        compute_t dz_tmp = compute_t(dz.data.elt[jt]) * params.out_scale;
+                        compute_t dy_tmp = compute_t(gamma[it].data.elt[jt]) * dz_tmp;
 
                         mdy_local += dy_tmp;
                         mdyy_local += dy_tmp * y_tmp;
