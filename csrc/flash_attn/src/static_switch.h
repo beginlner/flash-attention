@@ -197,6 +197,9 @@
     } else if (SPLIT_LENGTH == 480) {                               \
       constexpr static int SplitLength = 480;                       \
       return __VA_ARGS__();                                         \
+    } else if (SPLIT_LENGTH == 384) {                               \
+      constexpr static int SplitLength = 384;                       \
+      return __VA_ARGS__();                                         \
     } else {                                                        \
       TORCH_CHECK(                                                  \
         false, "Unsupported SplitLength");                          \
