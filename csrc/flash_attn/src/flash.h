@@ -19,6 +19,10 @@ constexpr int TOTAL_DIM = 0;
 constexpr int H_DIM = 1;
 constexpr int D_DIM = 2;
 
+#ifndef PARTITION_SIZE
+#define PARTITION_SIZE 2048
+#endif
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Qkv_params {

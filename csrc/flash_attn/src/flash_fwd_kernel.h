@@ -458,7 +458,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     // if (threadIdx.x == 0 && blockIdx.y == 1 && blockIdx.z == 0) { printf("params.knew_ptr = %p, seqlen_k_cache + seqlen_knew = %d\n", params.knew_ptr, binfo.seqlen_k_cache + (params.knew_ptr == nullptr ? 0 : params.seqlen_knew)); }
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
-    const int n_blocks_per_split = ((params.seqlen_k + kBlockN - 1) / kBlockN + num_n_splits - 1) / num_n_splits;
+    constexpr int n_blocks_per_split = PARTITION_SIZE / kBlockN;
     const int n_block_min = !Is_local
         ? n_split_idx * n_blocks_per_split
         : std::max(n_split_idx * n_blocks_per_split, (m_block * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q - params.window_size_left) / kBlockN);
@@ -468,6 +468,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
     }
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
+        if (!Is_local) { return; }
         if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
             return;
         }
@@ -1242,6 +1243,9 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
     const int tidx = threadIdx.x;
     const int bidx = blockIdx.x;
 
+    // TODO: Assume Varlen
+    const BlockInfo</*Varlen=*/true> binfo(params, bidx * kBlockM / (params.h * params.seqlen_q));
+    const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(binfo.actual_seqlen_k, PARTITION_SIZE));
     const index_t row_offset_lse = bidx * kBlockM;
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
                                    Shape<Int<kMaxSplits>, Int<kBlockM>>{},
@@ -1256,7 +1260,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
     for (int l = 0; l < kNLsePerThread; ++l) {
         const int row = l * kRowsPerLoadLSE + tidx / kBlockM;
         const int col = tidx % kBlockM;
-        ElementAccum lse = (row < params.num_splits && col < params.b * params.h * params.seqlen_q - bidx * kBlockM) ? gLSEaccum(row, col) : -INFINITY;
+        ElementAccum lse = (row < actual_num_splits && col < params.b * params.h * params.seqlen_q - bidx * kBlockM) ? gLSEaccum(row, col) : -INFINITY;
         if (row < kMaxSplits) { sLSE[row][col] = lse; }
         // if (bidx == 0 && tidx < 32) { printf("tidx = %d, row = %d, col = %d, lse = %f\n", tidx, row, col, lse); }
     }
@@ -1301,7 +1305,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
     for (int l = 0; l < kNLsePerThread; ++l) {
         const int row = l * kRowsPerLoadTranspose + tidx % kRowsPerLoadTranspose;
         const int col = tidx / kRowsPerLoadTranspose;
-        if (row < params.num_splits && col < kBlockM) { sLSE[row][col] = expf(lse_accum(l) - lse_logsum); }
+        if (row < actual_num_splits && col < kBlockM) { sLSE[row][col] = expf(lse_accum(l) - lse_logsum); }
     }
     __syncthreads();
 
@@ -1332,7 +1336,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
         for (int k = 0; k < size(tOpOaccum); ++k) { tOpOaccum(k) = get<1>(tOcOaccum(0, 0, k)) < params.d; }
     }
     // Load Oaccum in then scale and accumulate to O
-    for (int split = 0; split < params.num_splits; ++split) {
+    for (int split = 0; split < actual_num_splits; ++split) {
         flash::copy</*Is_even_MN=*/false, Is_even_K>(
             gmem_tiled_copy_Oaccum, tOgOaccum, tOrOaccum, tOcOaccum, tOpOaccum, params.b * params.h * params.seqlen_q - bidx * kBlockM
         );
