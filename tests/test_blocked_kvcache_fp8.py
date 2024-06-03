@@ -102,12 +102,12 @@ def test_flash_attention(d, v_dim):
     out_torch_attn = torch_attn()
     assert_close(out_blocked_flash, out_torch_attn, "blocked_flash_attn")
 
-    # timer(blocked_flash_attn)
-    # timer(blocked_flash_attn)
+    timer(blocked_flash_attn)
+    timer(blocked_flash_attn)
 
-    # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
-    #     blocked_flash_attn()
-    # print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        blocked_flash_attn()
+    print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
     # prof.export_chrome_trace("tests/flash_attn_trace.json")
 
 
