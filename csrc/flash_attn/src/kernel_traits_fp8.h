@@ -270,8 +270,6 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     using SmemLayoutQt = decltype(tile_to_shape(
             getSmemLayoutK<Element, kBlockM>(),
             make_shape(Int<kHeadDim>{}, Int<kBlockM>{})));
-    using SmemLayoutQt_t = decltype(
-    composition(SmemLayoutQt{}, make_layout(Shape<Int<kBlockM>, Int<kHeadDim>>{}, GenRowMajor{})));
 
     using SmemLayoutK = decltype(tile_to_shape(
             getSmemLayoutK<Element, kHeadDim>(),
@@ -280,8 +278,6 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     using SmemLayoutKt = decltype(tile_to_shape(
             getSmemLayoutK<Element, kBlockN>(),
             make_shape(Int<kHeadDim>{}, Int<kBlockN>{})));
-    using SmemLayoutKt_t = decltype(
-    composition(SmemLayoutKt{}, make_layout(Shape<Int<kBlockN>, Int<kHeadDim>>{}, GenRowMajor{})));
 
     using SmemLayoutV = decltype(tile_to_shape(
             getSmemLayoutK<Element, kHeadDimV>(),
@@ -294,8 +290,6 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     using SmemLayoutdOt = decltype(tile_to_shape(
             getSmemLayoutK<Element, kBlockM>(),
             make_shape(Int<kHeadDimV>{}, Int<kBlockM>{})));
-    using SmemLayoutdOt_t = decltype(
-    composition(SmemLayoutdOt{}, make_layout(Shape<Int<kBlockM>, Int<kHeadDimV>>{}, GenRowMajor{})));
 
     using SmemLayoutPt = decltype(tile_to_shape(
             getSmemLayoutK<Element, kBlockM>(),
@@ -322,6 +316,20 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
             make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
     using SmemCopyAtomdKV = Copy_Atom<DefaultCopy, OutElement>;
+
+    // Transpose Q, K and dO in shared memory
+    static_assert(kBlockM % 64 == 0);
+    static_assert(kBlockN % 64 == 0);
+    static_assert(kHeadDim % (4 * kNWarps) == 0);
+    static_assert(kHeadDimV % (4 * kNWarps) == 0);
+    using SmemTiledCopyX = decltype(make_tiled_copy(
+            Copy_Atom<SM75_U16x4_LDSM_T, Element>{},
+            Layout<Shape<Shape<_4, _4>, Shape<_8, Int<kNWarps / 4>>>, Stride<Stride<_1, _32>, Stride<_4, _128>>>{},
+            Layout<Shape<_4, _2>, Stride<_2, _1>>{}));
+    using SmemTiledCopyXt = decltype(make_tiled_copy(
+            Copy_Atom<SM90_U32x2_STSM_N, Element>{},
+            Layout<Shape<Shape<_8, Int<kNWarps / 4>>, Shape<_4, _4>>, Stride<Stride<_4, _128>, Stride<_1, _32>>>{},
+            Layout<Shape<_2, _4>, Stride<_4, _1>>{}));
 
     // Double buffer for sQ
     static constexpr int kSmemQSize = (size(SmemLayoutQ{}) + size(SmemLayoutQt{})) * (No_double_buffer ? 1 : 2) * sizeof_bytes_v<Element>;
