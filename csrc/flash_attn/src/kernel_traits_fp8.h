@@ -14,6 +14,8 @@
 #include "cutlass/layout/layout.h"
 #include <cutlass/numeric_types.h>
 
+#include "kernel_traits.h"
+
 using namespace cute;
 
 template <typename PrecType, int DIM> constexpr auto getSmemLayoutK() {
@@ -40,22 +42,6 @@ template <typename PrecType, int DIM> constexpr auto getSmemLayoutMN() {
         return GMMA::Layout_MN_SW32_Atom<PrecType>{};
     }
 }
-
-template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename elem_type=cutlass::half_t>
-struct Flash_kernel_traits {
-
-    using Element = elem_type;
-    static constexpr bool Has_cp_async = true;
-
-    using ElementAccum = float;
-    using index_t = int64_t;
-
-    using MMA_Atom_Arch = std::conditional_t<
-        std::is_same_v<elem_type, cutlass::half_t>,
-        MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
-        MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>
-    >;
-};
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
