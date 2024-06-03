@@ -401,3 +401,33 @@ void run_mha_fwd_hdim256(Flash_fwd_params &params, cudaStream_t stream) {
         });
     });
 }
+
+// fp8
+
+template<typename T, int Headdim>
+void run_mha_fwd_fp8_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream) {
+    TORCH_CHECK(Headdim == 576);
+    TORCH_CHECK(params.d_v == 512);
+    TORCH_CHECK(params.kvcache_quantization_type == 0);
+    run_flash_splitkv_fwd<Flash_fwd_fp8_kernel_traits<576, 64, 64, 8, false, false, T, cutlass::bfloat16_t, 512, true, 4>>(params, stream);
+}
+
+template<typename T>
+void run_mha_fwd_fp8_hdim192(Flash_fwd_params &params, cudaStream_t stream) {
+    constexpr static int Headdim = 192;
+    HEADDIMV_SWITCH((params.d_v == params.d ? 0 : params.d_v), [&] {
+        DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 128, 128, 8, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 64, 128, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 64, 64, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 64, 256, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 128, 64, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 128, 64, 8, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 128, 128, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 128, 256, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+//                run_flash_fwd<Flash_fwd_fp8_kernel_traits<Headdim, 128, 256, 8, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout, Is_causal>(params, stream);
+            });
+        });
+    });
+}

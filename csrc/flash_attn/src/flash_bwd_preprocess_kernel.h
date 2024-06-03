@@ -20,10 +20,11 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int THREADS_PER_ROW, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-inline __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engine0, Layout0> const &o,
+template <int THREADS_PER_ROW, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Engine2, typename Layout2>
+inline __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engine2, Layout2> const &o,
                                 Tensor<Engine1, Layout1> &dP_sum, const int gdP_col_stride, const float scale) {
     static_assert(Layout0::rank == 3, "Only support 3D Tensor");
+    static_assert(Layout2::rank == 3, "Only support 3D Tensor");
     static_assert(Layout1::rank == 1, "Only support 1D Tensor");
     CUTE_STATIC_ASSERT_V(do_.layout() == o.layout());
     // Reshape do_ and o from (8, kBlockM / 32, kHeadDim / 64) to (kBlockM / 32, 8 * kHeadDim / 64)
@@ -56,6 +57,7 @@ inline __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engi
 template<bool Clear_dQaccum=true, typename Kernel_traits, typename Params>
 inline __device__ void compute_dot_do_o(const Params &params) {
     using Element = typename Kernel_traits::Element;
+    using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
 
@@ -85,7 +87,7 @@ inline __device__ void compute_dot_do_o(const Params &params) {
     Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.do_ptr) + row_offset_do),
                              Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                              make_stride(params.do_row_stride, _1{}));
-    Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.o_ptr) + row_offset_o),
+    Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.o_ptr) + row_offset_o),
                             Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                             make_stride(params.o_row_stride, _1{}));
     Tensor gdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dq_accum_ptr) + row_offset_dq_accum),
@@ -96,13 +98,15 @@ inline __device__ void compute_dot_do_o(const Params &params) {
 
     typename Kernel_traits::GmemTiledCopydO gmem_tiled_copy_dO;
     auto gmem_thr_copy_dO = gmem_tiled_copy_dO.get_thread_slice(tidx);
+    typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
+    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
     // TODO: careful, we're zeroing out dQaccum with type float4, but when
     // we do atomicAdds, we use type float. The layouts are different. Check this.
     typename Kernel_traits::GmemTiledCopydQaccum gmem_tiled_copy_dQaccum;
     auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(tidx);
 
     Tensor tdOgdO = gmem_thr_copy_dO.partition_S(gdO);
-    Tensor tdOgO = gmem_thr_copy_dO.partition_S(gO);
+    Tensor tdOgO = gmem_thr_copy_O.partition_S(gO);
     Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum);
 
     Tensor cdO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDimV>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
@@ -120,7 +124,7 @@ inline __device__ void compute_dot_do_o(const Params &params) {
         gmem_tiled_copy_dO, tdOgdO, tdOrdO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
     );
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true>(
-        gmem_tiled_copy_dO, tdOgO, tdOrO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
+        gmem_tiled_copy_O, tdOgO, tdOrO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
     );
     // By right we need to scale dP up by 1/p_dropout, but instead we don't and only scale the final
     // results (dQ and dK) by 1/p_dropout. So we need to keep dP_sum scaled down by p_dropout here,
@@ -180,7 +184,7 @@ inline __device__ void clear_dKVaccum(const Params &params) {
 // This is used in the case where we want to parallelize the backward across seqlen_k.
 template<typename Kernel_traits, typename Params>
 inline __device__ void convert_dQ(const Params &params, const int nsplits) {
-    using Element = typename Kernel_traits::Element;
+    using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
 
@@ -206,14 +210,14 @@ inline __device__ void convert_dQ(const Params &params, const int nsplits) {
     const index_t row_offset_dq_accum = binfo.q_offset(params.seqlen_q_rounded * params.h * params.d_rounded, params.h * params.d_rounded, bidb)
         + (m_block * kBlockM + (params.cu_seqlens_q == nullptr ? 0 : 128 * bidb)) * params.h * params.d_rounded + bidh * params.d_rounded;
 
-    Tensor gdQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dq_ptr) + row_offset_dq),
+    Tensor gdQ = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.dq_ptr) + row_offset_dq),
                              Shape<Int<kBlockM>, Int<kHeadDim>>{},
                              make_stride(params.dq_row_stride, _1{}));
     Tensor gdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dq_accum_ptr) + row_offset_dq_accum),
                                   Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                   make_stride(params.h * params.d_rounded, _1{}));
 
-    Tensor sdQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
+    Tensor sdQ = make_tensor(make_smem_ptr(reinterpret_cast<OutElement *>(smem_)),
                              typename Kernel_traits::SmemLayoutdQ{});
 
     typename Kernel_traits::GmemTiledCopydQ gmem_tiled_copy_dQ;
@@ -245,11 +249,11 @@ inline __device__ void convert_dQ(const Params &params, const int nsplits) {
     #pragma unroll
     for (int i = 0; i < size(acc_dq); ++i) { acc_dq(i) *= params.scale_softmax_rp_dropout; }
     // Convert acc_dq from fp32 to fp16
-    Tensor rdQ = flash::convert_type<Element>(acc_dq);
+    Tensor rdQ = flash::convert_type<OutElement>(acc_dq);
     Tensor taccdQrdQ = smem_thr_copy_dQ.retile_S(rdQ);  // ((Atom,AtomNum), MMA_N, MMA_N)
     cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
     __syncthreads();
-    Tensor tdQrdQ = make_tensor<Element>(shape(tdQgdQ));
+    Tensor tdQrdQ = make_tensor<OutElement>(shape(tdQgdQ));
     cute::copy(gmem_tiled_copy_dQ, tdQsdQ, tdQrdQ);
 
     Tensor cdQ = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)

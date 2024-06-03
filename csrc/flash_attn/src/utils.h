@@ -218,6 +218,97 @@ __forceinline__ __device__ void gemm_rs(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tC
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Need this register byte permute/shuffle to match register layout of
+// (FP8 downcasted) accumulator of GEMM-I to FP8 operand A of GEMM-II.
+struct ReorgCFp8toAFp8 {
+    int selectorEx0;
+    int selectorEx1;
+    int selectorEx4;
+    int selectorEx5;
+    int upper_map[4] = {0,3,1,2};
+    int lower_map[4] = {1,2,0,3};
+
+
+    CUTLASS_DEVICE ReorgCFp8toAFp8() {
+        int laneId = cutlass::canonical_lane_idx();
+
+        if (laneId % 4 == 0 || laneId % 4 == 3) {
+            selectorEx0 = 0x3210;
+            selectorEx1 = 0x7654;
+            selectorEx4 = 0x5410;
+            selectorEx5 = 0x7632;
+        } else {
+            selectorEx0 = 0x7654;
+            selectorEx1 = 0x3210;
+            selectorEx4 = 0x1054;
+            selectorEx5 = 0x3276;
+        }
+
+    }
+
+    template <typename Fragment>
+    CUTLASS_DEVICE auto operator()(Fragment &accum) {
+
+        using namespace cute;
+
+        // First update `mi` to the max per-row
+        //
+        auto VT = shape<0>(accum); // number of vector elements per tile.
+        auto MT = shape<1>(accum); // number of tiles along M.
+        auto NT = shape<2>(accum); // number of tiles along N.
+
+        auto data = accum.data();
+        int n = 0;
+
+#pragma unroll
+        for (int i = 0; i < MT; ++i) {
+
+            // Traverse 2-rows + 2-cols (2x2) simultaneously.
+
+#pragma unroll
+            for (int k = 0; k < NT * size(VT) / 8; ++k) {
+
+                auto upper = *reinterpret_cast<uint32_t*>(&data[n]);
+                auto lower = *reinterpret_cast<uint32_t*>(&data[n+4]);
+
+                auto upper0 = __byte_perm(upper, lower, selectorEx0);
+                auto lower0 = __byte_perm(upper, lower, selectorEx1);
+                upper0 = __shfl_sync(uint32_t(-1),upper0, upper_map[threadIdx.x%4],4);
+                lower0 = __shfl_sync(uint32_t(-1),lower0, lower_map[threadIdx.x%4],4);
+
+                uint32_t *data_32bit = reinterpret_cast<uint32_t *>(&data[n]);
+                data_32bit[0] = __byte_perm(upper0, lower0, selectorEx4);
+                data_32bit[1] = __byte_perm(upper0, lower0, selectorEx5);
+                n += 8;
+            }
+        }
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+__forceinline__ __device__ void swizzle_rows(uint32_t &a, uint32_t &b, uint32_t c, uint32_t d) {
+    asm volatile("prmt.b32 %0, %1, %2, 0x6420;\n" : "=r"(a) : "r"(c), "r"(d));
+    asm volatile("prmt.b32 %0, %1, %2, 0x7531;\n" : "=r"(b) : "r"(c), "r"(d));
+}
+
+// Convert 8 bytes from 0123 4567 -> 0246 1357
+// x: (8, M, N)
+template<typename Tensor>
+__forceinline__ __device__ void permute_fp8(Tensor &x) {
+    for (int m = 0; m < size<1>(x); m++) {
+        for (int n = 0; n < size<2>(x); n++) {
+            auto data = reinterpret_cast<uint32_t*>(x(_, m, n).data());
+            uint32_t u, v;
+            swizzle_rows(u, v, data[0], data[1]);
+            data[0] = u;
+            data[1] = v;
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Convert acc_layout from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
 template<typename Layout>
 __forceinline__ __device__ auto convert_layout_acc_rowcol(Layout acc_layout) {
@@ -239,17 +330,22 @@ __forceinline__ __device__ auto convert_gmma_to_mma_tensor(Layout acc_layout) {
 
 // Convert acc_layout from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
 // if using m16n8k16, or to (4, MMA_M, MMA_N) if using m16n8k8.
+// or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
 template<typename MMA_traits, typename Layout>
 __forceinline__ __device__ auto convert_layout_acc_Aregs(Layout acc_layout) {
     using X = Underscore;
     static_assert(decltype(size<0>(acc_layout))::value == 4);
     static_assert(decltype(rank(acc_layout))::value == 3);
     constexpr int mma_shape_K = get<2>(typename MMA_traits::Shape_MNK{});
-    static_assert(mma_shape_K == 8 || mma_shape_K == 16);
+    static_assert(mma_shape_K == 8 || mma_shape_K == 16 || mma_shape_K == 32);
     if constexpr (mma_shape_K == 8) {
         return acc_layout;
-    } else {
+    } else if constexpr (mma_shape_K == 16) {
         auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
+        return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
+    } else {
+        // fp8
+        auto l = logical_divide(acc_layout, Shape<X, X, _4>{});  // (4, MMA_M, (4, MMA_N / 4)))
         return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
     }
 };
@@ -281,7 +377,7 @@ __forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tenso
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-__forceinline__ __device__ auto convert_type_out(Tensor<Engine0, Layout0> const &tensor0, Tensor<Engine1, Layout1> const &tensor1) {
+__forceinline__ __device__ auto convert_type_out(Tensor<Engine0, Layout0> const &tensor0, Tensor<Engine1, Layout1> &tensor1) {
     using From_type = typename Engine0::value_type;
     using To_type = typename Engine1::value_type;
     constexpr int numel = decltype(size(tensor0))::value;

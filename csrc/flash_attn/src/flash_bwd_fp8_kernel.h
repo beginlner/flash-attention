@@ -11,14 +11,13 @@
 #include <cutlass/numeric_types.h>
 
 #include "block_info.h"
-#include "kernel_traits.h"
+#include "kernel_traits_fp8.h"
 #include "utils.h"
 #include "softmax.h"
 #include "mask.h"
 #include "dropout.h"
 
 #include "alibi.h"
-#include "flash_bwd_fp8_kernel.h"
 
 namespace flash {
 
@@ -26,61 +25,15 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int MMA_N,
-          class... Args,
-          class TiledMMA>
-CUTE_HOST_DEVICE
-auto
-make_tiled_copy_B_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
-                                  TiledMMA           const& tiled_mma) {
-    constexpr int TileShape_N = decltype(tiled_mma.template tile_size_mnk<1>())::value;
-    constexpr int TileShape_K = decltype(tiled_mma.template tile_size_mnk<2>())::value;
-    using AtomShape_MNK = typename TiledMMA::AtomShape_MNK;
-    constexpr int AtomShape_N = decltype(size<1>(AtomShape_MNK{}))::value;
-    // Divide by 2 because right now we always use 2 for the ValLayout
-    constexpr int kNWarpsN = TileShape_N / AtomShape_N / 2;
-    constexpr int MMAStride_N = MMA_N * AtomShape_N * 2;
-    // This gives the correct layout, idk why.
-    // auto t = make_tile(Layout<Shape<Shape<_8, _2>, _2>,
-    //                           Stride<Stride<_1, _64>, _8> >{},
-    // auto t = make_tile(Layout<Shape<_8, _2, _2>,
-    //                           Stride<_1, _64, _8> >{},
-    auto t = make_tile(Layout<Shape<Int<AtomShape_N>, Int<kNWarpsN>, _2>,   // (8, 2, 2) or (8, 4, 2)
-                              Stride<_1, Int<MMAStride_N>, _8> >{},       // (1, 64, 8) or (1, 32, 8)
-                       make_layout(Int<TileShape_K>{}));
-    // if (cute::thread0()) {printf("make_tiled_copy_B_warpcontiguousN "); print(t); printf("\n");  }
-    return make_tiled_copy_impl(copy_atom, tiled_mma.get_layoutB_TV(), t);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template <int MMA_N,
-          class... Args,
-          class TiledMMA>
-CUTE_HOST_DEVICE
-auto
-make_tiled_copy_C_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
-                                  TiledMMA           const& tiled_mma) {
-    constexpr int TileShape_M = decltype(tiled_mma.template tile_size_mnk<0>())::value;
-    constexpr int TileShape_N = decltype(tiled_mma.template tile_size_mnk<1>())::value;
-    using AtomShape_MNK = typename TiledMMA::AtomShape_MNK;
-    constexpr int AtomShape_N = decltype(size<1>(AtomShape_MNK{}))::value;
-    // Divide by 2 because right now we always use 2 for the ValLayout
-    constexpr int kNWarpsN = TileShape_N / AtomShape_N / 2;
-    constexpr int MMAStride_N = MMA_N * AtomShape_N * 2;
-    auto t = make_tile(make_layout(Int<TileShape_M>{}),
-                       Layout<Shape<Int<AtomShape_N>, Int<kNWarpsN>, _2>,   // (8, 2, 2) or (8, 4, 2)
-                              Stride<_1, Int<MMAStride_N>, _8> >{});       // (1, 64, 8) or (1, 32, 8)
-    // if (cute::thread0()) {printf("make_tiled_copy_C_warpcontiguousN "); print(t); printf("\n");  }
-    return make_tiled_copy_impl(copy_atom, tiled_mma.get_layoutC_TV(), t);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_first, bool Is_last, bool Seq_parallel=false, typename Params>
-inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const int bidb, const int bidh, const int n_block) {
+inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, const int bidb, const int bidh, const int n_block) {
+    static_assert(!Is_dropout);
+    static_assert(!Is_first);
+    static_assert(!Is_last);
+    static_assert(Seq_parallel);
 
     using Element = typename Kernel_traits::Element;
+    using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
 
@@ -139,12 +92,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.do_ptr) + row_offset_do),
                              Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                              make_stride(params.do_row_stride, _1{}));
-    Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.o_ptr) + row_offset_o),
-                            Shape<Int<kBlockM>, Int<kHeadDimV>>{},
-                            make_stride(params.o_row_stride, _1{}));
-    Tensor gdQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dq_ptr) + row_offset_dq),
-                             Shape<Int<kBlockM>, Int<kHeadDim>>{},
-                             make_stride(params.dq_row_stride, _1{}));
     Tensor gdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dq_accum_ptr) + row_offset_dq_accum),
                                   Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                   make_stride(params.h * params.d_rounded, _1{}));
@@ -155,46 +102,33 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 
     Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
                             typename Kernel_traits::SmemLayoutQ{});
-    Tensor sQt = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutQtransposed{});
-    Tensor sQtNoSwizzle = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutQtransposedNoSwizzle{});
+    Tensor sQt = make_tensor(sQ.data() + size(sQ), typename Kernel_traits::SmemLayoutQt{});
     // Double buffer for sQ
-    Tensor sQ2 = make_tensor(sQ.data() + size(sQ),
-                            typename Kernel_traits::SmemLayoutQ{});
-    Tensor sQt2 = make_tensor(sQ2.data(), typename Kernel_traits::SmemLayoutQtransposed{});
-    Tensor sQtNoSwizzle2 = make_tensor(sQ2.data(), typename Kernel_traits::SmemLayoutQtransposedNoSwizzle{});
-    Tensor sdO = make_tensor(sQ.data() + (Double_buffer ? 2 : 1) * size(sQ), typename Kernel_traits::SmemLayoutdO{});
-    Tensor sdOt = make_tensor(sdO.data(), typename Kernel_traits::SmemLayoutdOtransposed{});
-    Tensor sdOtransposedNoSwizzle = make_tensor(sdO.data(),
-                                                typename Kernel_traits::SmemLayoutdOtransposedNoSwizzle{});
-    Tensor sK = make_tensor(sdO.data() + size(sdO), typename Kernel_traits::SmemLayoutK{});
-    Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutV{});
-    Tensor sKt = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutKtransposed{});
-    Tensor sKtNoSwizzle = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutKtransposedNoSwizzle{});
-    Tensor sdS = make_tensor(sV.data() + size(sV), typename Kernel_traits::SmemLayoutPdS{});
-    Tensor sdSt = make_tensor(sdS.data(), typename Kernel_traits::SmemLayoutPdStransposed{});
-    Tensor sdStNoSwizzle = make_tensor(sdS.data(), typename Kernel_traits::SmemLayoutPdStransposedNoSwizzle{});
-    Tensor sP = make_tensor(sdS.data() + size(sdS), typename Kernel_traits::SmemLayoutPdS{});
-    Tensor sPt = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutPdStransposed{});
-    Tensor sPtNoSwizzle = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutPdStransposedNoSwizzle{});
-    // sP and sdQ share the same memory so be careful
-    Tensor sdQ = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutdQ{});
+    Tensor sQ2 = make_tensor(sQt.data() + size(sQt), typename Kernel_traits::SmemLayoutQ{});
+    Tensor sQt2 = make_tensor(sQ2.data() + size(sQ2), typename Kernel_traits::SmemLayoutQt{});
+    Tensor sK = make_tensor((Double_buffer ? sQt2.data() : sQt.data()) + size(sQt), typename Kernel_traits::SmemLayoutK{});
+    Tensor sKt = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKt{});
+    Tensor sV = make_tensor(sKt.data() + size(sKt), typename Kernel_traits::SmemLayoutV{});
+    Tensor sdO = make_tensor(sV.data() + size(sV), typename Kernel_traits::SmemLayoutdO{});
+    Tensor sdOt = make_tensor(sdO.data() + size(sdO), typename Kernel_traits::SmemLayoutdOt{});
+    Tensor sPt = make_tensor(sdOt.data() + size(sdOt), typename Kernel_traits::SmemLayoutPt{});
+    Tensor sdS = make_tensor(sPt.data() + size(sPt), typename Kernel_traits::SmemLayoutdS{});
+    Tensor sdSt = make_tensor(sdS.data() + size(sdS), typename Kernel_traits::SmemLayoutdSt{});
+
+    // View of shared memory
+    Tensor sQt_t = make_tensor(sQt.data(), typename Kernel_traits::SmemLayoutQt_t{});
+    Tensor sQt2_t = make_tensor(sQt2.data(), typename Kernel_traits::SmemLayoutQt_t{});
+    Tensor sKt_t = make_tensor(sKt.data(), typename Kernel_traits::SmemLayoutKt_t{});
+    Tensor sdOt_t = make_tensor(sdOt.data(), typename Kernel_traits::SmemLayoutdOt_t{});
+    Tensor sPt_t = make_tensor(sPt.data(), typename Kernel_traits::SmemLayoutPt_t{});
+    Tensor sdSt_t = make_tensor(sdSt.data(), typename Kernel_traits::SmemLayoutdSt_t{});
 
     typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
-    using GmemTiledCopydO = std::conditional_t<
-        Is_first,
-        typename Kernel_traits::GmemTiledCopydO,
-        typename Kernel_traits::GmemTiledCopyQKV
-    >;
+    using GmemTiledCopydO = typename Kernel_traits::GmemTiledCopyQKV;
     GmemTiledCopydO gmem_tiled_copy_dO;
     auto gmem_thr_copy_dO = gmem_tiled_copy_dO.get_thread_slice(tidx);
-    typename Kernel_traits::GmemTiledCopydQ gmem_tiled_copy_dQ;
-    auto gmem_thr_copy_dQ = gmem_tiled_copy_dQ.get_thread_slice(tidx);
-    using GmemLayoutAtomdQaccum = std::conditional_t<
-        !Seq_parallel,
-        typename Kernel_traits::GmemTiledCopydQaccum,
-        typename Kernel_traits::GmemTiledCopydQaccumAtomicAdd
-    >;
+    using GmemLayoutAtomdQaccum = typename Kernel_traits::GmemTiledCopydQaccumAtomicAdd;
     GmemLayoutAtomdQaccum gmem_tiled_copy_dQaccum;
     auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(tidx);
 
@@ -202,13 +136,10 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
     Tensor tdOgdO = gmem_thr_copy_dO.partition_S(gdO);
     Tensor tdOsdO = gmem_thr_copy_dO.partition_D(sdO);
-    Tensor tdOgO = gmem_thr_copy_dO.partition_S(gO);
     Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K)
     Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
     Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
     Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
-    Tensor tdQsdQ = gmem_thr_copy_dQ.partition_S(sdQ);    // ((Atom,AtomNum),ATOM_M,ATOM_N)
-    Tensor tdQgdQ = gmem_thr_copy_dQ.partition_D(gdQ);
     Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum);
     // if (cute::thread0()) { print(tdQgdQaccum.layout()); printf("\n"); }
     // __syncthreads();
@@ -232,19 +163,19 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 
     typename Kernel_traits::TiledGMmadK tiled_gmma_dk;
     auto thr_gmma_dk = tiled_gmma_dk.get_thread_slice(tidx);
-    Tensor tdKrdSt = thr_gmma_dk.partition_fragment_A(sdStNoSwizzle);
-    Tensor tdKrQt = thr_gmma_dk.partition_fragment_B(sQtNoSwizzle);
-    Tensor tdKrQt2 = thr_gmma_dk.partition_fragment_B(sQtNoSwizzle2);
+    Tensor tdKrdSt = thr_gmma_dk.partition_fragment_A(sdSt);
+    Tensor tdKrQt = thr_gmma_dk.partition_fragment_B(sQt);
+    Tensor tdKrQt2 = thr_gmma_dk.partition_fragment_B(sQt2);
 
     typename Kernel_traits::TiledGMmadV tiled_gmma_dv;
     auto thr_gmma_dv = tiled_gmma_dv.get_thread_slice(tidx);
-    Tensor tdVrPt = thr_gmma_dv.partition_fragment_A(sPtNoSwizzle);
-    Tensor tdVrdOt = thr_gmma_dv.partition_fragment_B(sdOtransposedNoSwizzle);
+    Tensor tdVrPt = thr_gmma_dv.partition_fragment_A(sPt);
+    Tensor tdVrdOt = thr_gmma_dv.partition_fragment_B(sdOt);
 
     typename Kernel_traits::TiledGMmadQ tiled_gmma_dq;
     auto thr_gmma_dq = tiled_gmma_dq.get_thread_slice(tidx);
     Tensor tdQrdS = thr_gmma_dq.partition_fragment_A(sdS);
-    Tensor tdQrKt = thr_gmma_dq.partition_fragment_B(sKtNoSwizzle);
+    Tensor tdQrKt = thr_gmma_dq.partition_fragment_B(sKt);
 
     Tensor tdKrdK_gmma = partition_fragment_C(tiled_gmma_dk, Shape<Int<kBlockN>, Int<kHeadDim>>{});
     Tensor acc_dk = make_tensor(tdKrdK_gmma.data(), flash::convert_gmma_to_mma_tensor(tdKrdK_gmma.layout()));  // MMA, MMA_N, MMA_K
@@ -255,35 +186,54 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // Copy Atom retiling
     //
 
-    auto smem_tiled_copy_QdO = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp);
-    auto smem_thr_copy_QdO = smem_tiled_copy_QdO.get_thread_slice(tidx);
-    Tensor tSsQ = smem_thr_copy_QdO.partition_S(sQ);
-    Tensor tdPsdO = smem_thr_copy_QdO.partition_S(sdO);
+    Tensor tPsPt_t = thr_gmma_s.partition_C(sPt_t);
+    Tensor tdSsdS = thr_gmma_dp.partition_C(sdS);
+    Tensor tdSsdSt_t = thr_gmma_dp.partition_C(sdSt_t);
+//    if (thread(0)) {
+//        print(tPsPt_t);
+//        print("\n");
+//        print(tdSsdS);
+//        print("\n");
+//        print(tdSsdSt_t);
+//        print("\n");
+//        print("hahaha\n");
+//    }
 
-    // auto smem_thr_copy_KV = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp).get_thread_slice(tidx);
-    auto smem_tiled_copy_KV = make_tiled_copy_B_warpcontiguousN<MMA_N_SdP>(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp);
-    auto smem_thr_copy_KV = smem_tiled_copy_KV.get_thread_slice(tidx);
-    Tensor tSsK = smem_thr_copy_KV.partition_S(sK);
-    // if (cute::thread(0, 0) && n_block == 0) { printf("sK layout: "); print(sK.layout()); printf("\n"); }
-    // if (cute::thread(0, 0) && n_block == 0) { print(tSsK.layout()); printf("\n"); }
-    Tensor tdPsV = smem_thr_copy_KV.partition_S(sV);
-
-    // Partition sP and sdS to match the accumulator partitioning
-    // This has to be tiled_mma_sdp, not tiled_mma_dkv
-    // auto smem_thr_copy_PdS = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomPdS{}, tiled_mma_sdp).get_thread_slice(tidx);
-    auto smem_tiled_copy_PdS = make_tiled_copy_C_warpcontiguousN<MMA_N_SdP>(typename Kernel_traits::SmemCopyAtomPdS{}, tiled_mma_sdp);
-    auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(tidx);
-    Tensor tPsP = smem_thr_copy_PdS.partition_D(sP);      // ((Atom,AtomNum),PIPE_M,PIPE_N)
-    // if (cute::thread(0, 0) && n_block == 0) { printf("sP layout: "); print(sP.layout()); printf("\n"); }
-    // if (cute::thread(0, 0) && n_block == 0) { print(tPsP.layout()); printf("\n"); }
-    // if (n_block == 0 && blockIdx.x == 0 && blockIdx.y == 0 && tidx < 64) {
-    //     printf("tidx=%d, tPsP = 0x%p\n", tidx, tPsP.data());
-    // }
-    Tensor tdSsdS = smem_thr_copy_PdS.partition_D(sdS);   // ((Atom,AtomNum),PIPE_M,PIPE_N)
-
-    auto smem_tiled_copy_dQ = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdQ{}, tiled_gmma_dq);
-    auto smem_thr_copy_dQ = smem_tiled_copy_dQ.get_thread_slice(tidx);
-    Tensor taccdQsdQ = smem_thr_copy_dQ.partition_D(sdQ);  // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    // Transpose Q, K and dO in shared memory
+    auto smem_tiled_copy = make_tiled_copy(
+            Copy_Atom<DefaultCopy, Element>{},
+            Layout<Shape<_8, _32>, Stride<_32, _1>>{},
+            Layout<Shape<_1, _1>>{});
+    auto smem_thr_copy = smem_tiled_copy.get_thread_slice(tidx);
+    Tensor tcQsQ = smem_thr_copy.partition_S(sQ);
+    Tensor tcQsQt_t = smem_thr_copy.partition_D(sQt_t);
+    Tensor tcQsQ2 = smem_thr_copy.partition_S(sQ2);
+    Tensor tcQsQt2_t = smem_thr_copy.partition_D(sQt2_t);
+    Tensor tcQrQ = make_fragment_like(tcQsQ);
+    Tensor tcKsK = smem_thr_copy.partition_S(sK);
+    Tensor tcKsKt_t = smem_thr_copy.partition_D(sKt_t);
+    Tensor tcKrK = make_fragment_like(tcKsK);
+    Tensor tcdOsdO = smem_thr_copy.partition_S(sdO);
+    Tensor tcdOsdOt_t = smem_thr_copy.partition_D(sdOt_t);
+    Tensor tcdOrdO = make_fragment_like(tcdOsdO);
+//    if (thread(0)) {
+//        print(tcQsQ);
+//        print("\n");
+//        print(tcQsQt_t);
+//        print("\n");
+//        print(tcQsQ2);
+//        print("\n");
+//        print(tcQsQt2_t);
+//        print("\n");
+//        print(tcKsK);
+//        print("\n");
+//        print(tcKsKt_t);
+//        print("\n");
+//        print(tcdOsdO);
+//        print("\n");
+//        print(tcdOsdOt_t);
+//        print("\n");
+//    }
 
     //
     // PREDICATES
@@ -308,8 +258,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 
     // Prologue
 
-    // We'll advance gdQ and gdQaccum before the 1st read/write.
-    tdQgdQ.data() = tdQgdQ.data() + kBlockM * params.dq_row_stride;
+    // We'll advance gdQaccum before the 1st read/write.
     tdQgdQaccum.data() = tdQgdQaccum.data() + kBlockM * params.h * params.d_rounded;
 
     int m_block = m_block_max - 1;
@@ -333,18 +282,18 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
           + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;
         const index_t row_offset_dv = binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
           + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride;
-        Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dk_ptr) + row_offset_dk),
+        Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.dk_ptr) + row_offset_dk),
                                  Shape<Int<kBlockN>, Int<kHeadDim>>{},
                                  make_stride(params.dk_row_stride, _1{}));
-        Tensor gdV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dv_ptr) + row_offset_dv),
+        Tensor gdV = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.dv_ptr) + row_offset_dv),
                                  Shape<Int<kBlockN>, Int<kHeadDimV>>{},
                                  make_stride(params.dv_row_stride, _1{}));
         typename Kernel_traits::GmemTiledCopydKV gmem_tiled_copy_dKV;
         auto gmem_thr_copy_dKV = gmem_tiled_copy_dKV.get_thread_slice(tidx);
         Tensor tdKgdK = gmem_thr_copy_dKV.partition_D(gdK);
         Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
-        Tensor tdKrdK = make_tensor<Element>(shape(tdKgdK));
-        Tensor tdVrdV = make_tensor<Element>(shape(tdVgdV));
+        Tensor tdKrdK = make_tensor<OutElement>(shape(tdKgdK));
+        Tensor tdVrdV = make_tensor<OutElement>(shape(tdVgdV));
         clear(tdKrdK);
         clear(tdVrdV);
         Tensor cdKV = make_identity_tensor(make_shape(size<0>(gdK), size<1>(gdK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
@@ -363,27 +312,16 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     }
 
     if (Double_buffer && m_block % 2 == 1) {  // Double buffer for sQ
-        tQsQ.data() = tQsQ.data() + size(sQ);
-        tSsQ.data() = tSsQ.data() + size(sQ);
+        tQsQ.data() = tQsQ.data() + size(sQ) * 2;
     }
 
-    if ((!Is_first && !Seq_parallel) || params.deterministic) { __syncthreads(); }
+    if (params.deterministic) { __syncthreads(); }
 
     Tensor tdOrdO = make_fragment_like(tdOgdO);
-    Tensor tdOrO = make_fragment_like(tdOgO);
-    if (!Is_first) {
-        // Clear the smem tiles to account for predicated off loads
-        flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
-            gmem_tiled_copy_dO, tdOgdO, tdOsdO, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
-        );
-    } else {
-        flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
-            gmem_tiled_copy_dO, tdOgdO, tdOrdO, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
-        );
-        flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
-            gmem_tiled_copy_dO, tdOgO, tdOrO, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
-        );
-    }
+    // Clear the smem tiles to account for predicated off loads
+    flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
+        gmem_tiled_copy_dO, tdOgdO, tdOsdO, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
+    );
     flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
         gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
     );
@@ -417,13 +355,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     );
     flash::cp_async_fence();
 
-    // if (cute::thread0()) { print(tdOgdO.layout()); printf("\n"); print(tdOrdO); print(tdOrO); }
-    if (Is_first) {
-        cute::copy(tdOrdO, tdOsdO);
-        dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, gdPsum,
-                                                    Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout);
-    }
-
     flash::Dropout dropout(params.rng_state[0], params.rng_state[1], params.p_dropout_in_uint8_t,
                            bidb, bidh, tidx, params.h);
 
@@ -453,6 +384,41 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // if (cute::thread0()) { print(tSrK); }
         flash::gemm(tiled_gmma_s, (!Double_buffer || m_block % 2 == 0) ? tSrQ : tSrQ2, tSrK, tSrS_gmma);
 
+        // TODO: Optimize it like the forward kernel.
+        if (m_block == m_block_max - 1) {
+            cute::copy(smem_tiled_copy, tcKsK, tcKrK);
+            cute::copy(smem_tiled_copy, tcKrK, tcKsKt_t);
+        }
+        if (Double_buffer && m_block % 2 == 1) {
+            cute::copy(smem_tiled_copy, tcQsQ2, tcQrQ);
+            cute::copy(smem_tiled_copy, tcQrQ, tcQsQt2_t);
+        } else {
+            cute::copy(smem_tiled_copy, tcQsQ, tcQrQ);
+            cute::copy(smem_tiled_copy, tcQrQ, tcQsQt_t);
+        }
+        cute::copy(smem_tiled_copy, tcdOsdO, tcdOrdO);
+        cute::copy(smem_tiled_copy, tcdOrdO, tcdOsdOt_t);
+
+//        __syncthreads();
+//        if (thread(0)) {
+//            print("sQ");
+//            print_tensor(sQ);
+//            print("sQt");
+//            print_tensor(sQt);
+//            print("sQ2");
+//            print_tensor(sQ2);
+//            print("sQt2");
+//            print_tensor(sQt2);
+//            print("sK");
+//            print_tensor(sK);
+//            print("sKt");
+//            print_tensor(sKt);
+//            print("sdO");
+//            print_tensor(sdO);
+//            print("sdOt");
+//            print_tensor(sdOt);
+//        }
+
         // Reshape acc_s from (MMA=4, MMA_N, MMA_N) to (col=(2, MMA_N), row=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         // if (cute::thread(32, 0)) { print(scores); }
@@ -467,7 +433,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // In the end when we multiply with K to get dQ, the corresponding values of K would be 0,
         // so the result would still be correct.
         // However, it's possible that the values in acc_s are so large that they overflow
-        // when we multiply with dP and convert to fp16, resulting in Inf in dS and NaNs in dQ.
+        // when we multiply with dP and convert to fp8, resulting in Inf in dS and NaNs in dQ.
         // So we need to mask out the elements beyond actual_seqlen_k.
         if (!Is_causal && !Is_local) {
             if (!Is_even_MN && (n_block + 1) * kBlockN >= binfo.actual_seqlen_k) {
@@ -502,28 +468,9 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // if (cute::thread(32, 0)) { print(scores); }
         // Compute the exponential value.
         flash::scale_apply_exp2</*scale_max=*/false>(scores, lse, params.scale_softmax_log2);
-        if constexpr (Is_dropout) {
-            int warp_id = tidx / 32;
-            int block_row_idx = m_block * (kBlockM / 16) + warp_id % AtomLayoutMS;
-            // Need col to be multiples of 32, since we're doing dropout with block of 16 x 32
-            static_assert(MMA_N_SdP % 2 == 0);
-            int block_col_idx = n_block * (kBlockN / 32) + (warp_id / AtomLayoutMS) * (MMA_N_SdP / 2);
-            dropout.template apply_dropout</*encode_dropout_in_sign_bit=*/true>(
-                acc_s, block_row_idx, block_col_idx, AtomLayoutMS
-            );
-        }
-        // Convert scores from fp32 to fp16/bf16
-        Tensor rP = !Is_dropout
-            ? flash::convert_type<Element>(acc_s)
-            : flash::convert_type_relu<Element>(acc_s);
-        // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_N, MMA_N / 2)
-        // if using m16n8k16 or (4, MMA_N, MMA_N) if using m16n8k8.
-        Tensor tPrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMmaSdP>(rP.layout()));
-        Tensor tPaP = smem_thr_copy_PdS.retile_S(tPrP);     // ((Atom,AtomNum), MMA_N, MMA_N)
-        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP);
-        // if (cute::thread0()) { print(tPaP); }
-        // __syncthreads();
-        // if (cute::thread0()) { print(sP); }
+        // Convert scores from fp32 to fp8
+        Tensor tSrS_gmma_fp8 = flash::convert_type<Element>(tSrS_gmma);
+        cute::copy(tSrS_gmma_fp8, tPsPt_t);
 
         Tensor tdPrdP_gmma = partition_fragment_C(tiled_gmma_dp, Shape<Int<kBlockM>, Int<kBlockN>>{});
         Tensor acc_dp = make_tensor(tdPrdP_gmma.data(), flash::convert_gmma_to_mma_tensor(tdPrdP_gmma.layout()));  // (MMA=4, MMA_N, MMA_N)
@@ -532,14 +479,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         CUTE_STATIC_ASSERT_V(size<2>(acc_dp) == size<2>(acc_s));                     // MMA
 
         clear(acc_dp);
-        // Tensor acc_dp_reshaped = make_tensor(acc_dp.data(), flash::convert_layout_acc_rowcol(acc_dp.layout()));
-        // #pragma unroll
-        // for (int mi = 0; mi < size<0>(acc_dp_reshaped); ++mi) {
-        //     #pragma unroll
-        //     for (int ni = 0; ni < size<1>(acc_dp_reshaped); ++ni) {
-        //         acc_dp_reshaped(mi, ni) = -dP_sum(mi);
-        //     }
-        // }
 
         // if (cute::thread0()) { print(dP_sum); }
 
@@ -548,7 +487,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // Reshape acc_dp from (MMA=4, MMA_N, MMA_N) to (col=(2, MMA_N), row=(2, MMA_N))
         Tensor dS = make_tensor(acc_dp.data(), flash::convert_layout_acc_rowcol(acc_dp.layout()));
         auto pointwise_mult = [](float p, float dp, float d) {
-            return p * (!Is_dropout || p >= 0 ? dp - d : d);
+            return p * (dp - d);
         };
         #pragma unroll
         for (int mi = 0; mi < size<0>(dS); ++mi) {
@@ -562,41 +501,29 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         Tensor tdQrdQ_gmma = partition_fragment_C(tiled_gmma_dq, Shape<Int<kBlockM>, Int<kHeadDim>>{});
         Tensor acc_dq = make_tensor(tdQrdQ_gmma.data(), flash::convert_gmma_to_mma_tensor(tdQrdQ_gmma.layout()));  // MMA, MMA_N, MMA_K
         tdQgdQaccum.data() = tdQgdQaccum.data() + (-int(kBlockM * params.h * params.d_rounded));
-        if (Is_first || Seq_parallel) {
-            clear(acc_dq);
-        } else {
-            // Reshape acc_dq from (4, 1, 2) to (4, 2, 1) to write to gdQaccum
-            Tensor acc_dq_reshaped = make_tensor(acc_dq.data(),
-                                                 make_layout(get<0>(acc_dq.layout()),
-                                                             get<2>(acc_dq.layout()),
-                                                             get<1>(acc_dq.layout())));
-            cute::copy(gmem_tiled_copy_dQaccum, tdQgdQaccum, acc_dq_reshaped);
-        }
+        clear(acc_dq);
 
         if (Double_buffer && m_block > m_block_min) {
             // Double buffer for sQ
-            const int sQ_offset = m_block % 2 == 0 ? size(sQ) : -size(sQ);
+            const int sQ_offset = m_block % 2 == 0 ? size(sQ) * 2 : -size(sQ) * 2;
             tQsQ.data() = tQsQ.data() + sQ_offset;
-            tSsQ.data() = tSsQ.data() + sQ_offset;
             // Advance gQ
             tQgQ.data() = tQgQ.data() + (-int(kBlockM * params.q_row_stride));
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ);
             flash::cp_async_fence();
         }
 
-        Tensor dS_reshaped = acc_dp;
-        // Convert dS from fp32 to fp16
-        Tensor tdSrdS = flash::convert_type<Element>(dS_reshaped);
-        // if (cute::thread0()) { print(tPrP); }
-        Tensor tdSadS = smem_thr_copy_PdS.retile_S(tdSrdS);                                          // ((Atom,AtomNum), MMA_N, MMA_N)
-        cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
+        // Convert dS from fp32 to fp8
+        Tensor tdPrdP_gmma_fp8 = flash::convert_type<Element>(tdPrdP_gmma);
+        cute::copy(tdPrdP_gmma_fp8, tdSsdS);
+        cute::copy(tdPrdP_gmma_fp8, tdSsdSt_t);
         __syncthreads();
 
-        // Layout p_l = tPrP.layout();
-        // Tensor tdVrPt = make_tensor(tPrP.data(), make_layout(get<0>(p_l), get<2>(p_l), get<1>(p_l)));
-        // flash::gemm_rs(acc_dv, tdVrPt, tdVrdO, tdVsdOt, tiled_mma_dkv, smem_thr_copy_QdOt);
-        // Tensor tdKrdSt = make_tensor(tdSrdS.data(), tdVrPt.layout());
-        // flash::gemm_rs(acc_dk, tdKrdSt, tdKrQt, tdKsQt, tiled_mma_dkv, smem_thr_copy_QdOt);
+//        if (thread0()) {
+//            print("sPt_t");
+//            print_tensor(sPt_t);
+//        }
+
         flash::gemm(tiled_gmma_dv, tdVrPt, tdVrdOt, tdVrdV_gmma);
         // if (cute::thread0() && n_block == 0 && m_block == 0) { print(tdVrPt); }
         // if (cute::thread0()) { print(acc_dv); }
@@ -606,14 +533,8 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         if (m_block > m_block_min) {
             // Advance gdO
             tdOgdO.data() = tdOgdO.data() + (-int(kBlockM * params.do_row_stride));
-            if (Is_first) {
-                tdOgO.data() = tdOgO.data() + (-int(kBlockM * params.o_row_stride));
-                flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgdO, tdOrdO, tQcQ, tQpQ);
-                flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgO, tdOrO, tQcQ, tQpQ);
-            } else {
-                flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgdO, tdOsdO, tQcQ, tQpQ);
-                flash::cp_async_fence();
-            }
+            flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgdO, tdOsdO, tQcQ, tQpQ);
+            flash::cp_async_fence();
         }
 
         flash::gemm(tiled_gmma_dq, tdQrdS, tdQrKt, tdQrdQ_gmma);
@@ -626,28 +547,9 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             gdPsum.data() = gdPsum.data() + (-int(kBlockM));
         }
 
-        if (!Is_last) {
-            // Reshape acc_dq from (4, 1, 2) to (4, 2, 1) to write to gdQaccum
-            Tensor acc_dq_reshaped = make_tensor(acc_dq.data(),
-                                                 make_layout(get<0>(acc_dq.layout()),
-                                                             get<2>(acc_dq.layout()),
-                                                             get<1>(acc_dq.layout())));
-            if (!Seq_parallel) {
-                cute::copy(gmem_tiled_copy_dQaccum, acc_dq_reshaped, tdQgdQaccum);
-            } else {
-                // if (cute::thread0()) { print(acc_dq.layout()); printf("\n"); print(acc_dq_reshaped.layout()); printf("\n"); print(tdQgdQaccum.layout()); printf("\n"); }
-                CUTE_STATIC_ASSERT_V(size(acc_dq) == size(tdQgdQaccum));
-                #pragma unroll
-                for (int i = 0; i < size(acc_dq); ++i) { atomicAdd(&tdQgdQaccum(i), acc_dq(i)); }
-            }
-        } else {
-            #pragma unroll
-            for (int i = 0; i < size(acc_dq); ++i) { acc_dq(i) *= params.scale_softmax_rp_dropout; }
-            // Convert acc_dq from fp32 to fp16
-            Tensor rdQ = flash::convert_type<Element>(acc_dq);
-            Tensor taccdQrdQ = smem_thr_copy_dQ.retile_S(rdQ);  // ((Atom,AtomNum), MMA_N, MMA_N)
-            cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
-        }
+        CUTE_STATIC_ASSERT_V(size(acc_dq) == size(tdQgdQaccum));
+        #pragma unroll
+        for (int i = 0; i < size(acc_dq); ++i) { atomicAdd(&tdQgdQaccum(i), acc_dq(i)); }
 
         flash::gemm(tiled_gmma_dk, tdKrdSt, (!Double_buffer || m_block % 2 == 0) ? tdKrQt : tdKrQt2, tdKrdK_gmma);
         // if (cute::thread0()) { print(acc_dk); }
@@ -659,43 +561,18 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             flash::cp_async_fence();
         }
 
-        if (Is_first && m_block > m_block_min) {
-            cute::copy(tdOrdO, tdOsdO);
-            dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, gdPsum,
-                                                        Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout);
-        }
-
-        if (Is_last) {
-            __syncthreads();
-            Tensor tdQrdQ = make_tensor<Element>(shape(tdQgdQ));
-            cute::copy(gmem_tiled_copy_dQ, tdQsdQ, tdQrdQ);
-            tdQgdQ.data() = tdQgdQ.data() + (-int(kBlockM * params.dq_row_stride));
-            Tensor cdQ = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-            Tensor tdQcdQ = gmem_thr_copy_dQ.partition_D(cdQ);
-            #pragma unroll
-            for (int m = 0; m < size<1>(tdQgdQ); ++m) {
-                if (Is_even_MN || get<0>(tdQcdQ(0, m, 0)) < binfo.actual_seqlen_q - m_block * kBlockM) {
-                    cute::copy(gmem_tiled_copy_dQ, tdQrdQ(_, m, _), tdQgdQ(_, m, _));
-                }
-            }
-        }
-
     }
 
     // Epilogue
 
-    if (Is_dropout) {
-        #pragma unroll
-        for (int i = 0; i < size(acc_dv); ++i) { acc_dv(i) *= params.rp_dropout; }
-    }
     #pragma unroll
     for (int i = 0; i < size(acc_dk); ++i) { acc_dk(i) *= params.scale_softmax_rp_dropout; }
 
     // Convert acc_dv from fp32 to fp16
-    Tensor rdK = flash::convert_type<Element>(acc_dk);
-    Tensor rdV = flash::convert_type<Element>(acc_dv);
+    Tensor rdK = flash::convert_type<OutElement>(acc_dk);
+    Tensor rdV = flash::convert_type<OutElement>(acc_dv);
 
-    Tensor sdK = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutdK{});  // (SMEM_N, SMEM_K)
+    Tensor sdK = make_tensor(make_smem_ptr(recast_ptr<OutElement>(smem_)), typename Kernel_traits::SmemLayoutdK{});  // (SMEM_N, SMEM_K)
     Tensor sdV = make_tensor(sdK.data() + size(sdK), typename Kernel_traits::SmemLayoutdV{}); // (SMEM_N, SMEM_K)
 
     // Partition sdV and sdK to match the accumulator partitioning
@@ -712,7 +589,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // Without syncthreads, some thread might modify the location of sK while another thread
     // is reading it for dQ gemm, leading to a race condition.
     // If Is_last, there's already a __syncthreads() at the end of the loop.
-    if (!Is_last) { __syncthreads(); }
+    __syncthreads();
 
     cute::copy(smem_tiled_copy_dK, taccdKrdK, taccdKsdK);
     cute::copy(smem_tiled_copy_dK, taccdVrdV, taccdVsdV);
@@ -721,10 +598,10 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
        + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;
     const index_t row_offset_dv = binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
        + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride;
-    Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dk_ptr) + row_offset_dk),
+    Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.dk_ptr) + row_offset_dk),
                              Shape<Int<kBlockN>, Int<kHeadDim>>{},
                              make_stride(params.dk_row_stride, _1{}));
-    Tensor gdV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dv_ptr) + row_offset_dv),
+    Tensor gdV = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.dv_ptr) + row_offset_dv),
                              Shape<Int<kBlockN>, Int<kHeadDimV>>{},
                              make_stride(params.dv_row_stride, _1{}));
 
@@ -736,9 +613,9 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
 
     __syncthreads();
-    Tensor tdKrdK = make_tensor<Element>(shape(tdKgdK));
+    Tensor tdKrdK = make_tensor<OutElement>(shape(tdKgdK));
     cute::copy(gmem_tiled_copy_dKV, tdKsdK, tdKrdK);
-    Tensor tdVrdV = make_tensor<Element>(shape(tdVgdV));
+    Tensor tdVrdV = make_tensor<OutElement>(shape(tdVgdV));
     cute::copy(gmem_tiled_copy_dKV, tdVsdV, tdVrdV);
     Tensor cdKV = make_identity_tensor(make_shape(size<0>(sdK), size<1>(sdK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
     Tensor tdKVcdKV = gmem_thr_copy_dKV.partition_D(cdKV);
@@ -753,52 +630,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         gmem_tiled_copy_dKV, tdVrdV, tdVgdV, tdKVcdKV, tdKVpdKV, binfo.actual_seqlen_k - n_block * kBlockN
     );
 
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Has_alibi, bool Is_even_M, bool Is_even_K, typename Params>
-inline __device__ void compute_dq_dk_dv(const Params &params) {
-
-    // The block index for the batch.
-    const int bidb = blockIdx.x;
-    // const int bidb = blockIdx.y;
-    // The block index for the head.
-    const int bidh = blockIdx.y;
-    // const int bidh = blockIdx.z;
-    // The thread index.
-    const int tidx = threadIdx.x;
-
-    const int n_block_max = (params.seqlen_k + Kernel_traits::kBlockN - 1) / Kernel_traits::kBlockN;
-    if (n_block_max == 1) {
-        compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Has_alibi, Is_even_M, Is_even_K, true, true>(params, bidb, bidh, 0);
-    } else {
-        // Iterating backward from n_block_max - 1 to 0 might save 1 register
-        compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Has_alibi, Is_even_M, Is_even_K, true, false>(params, bidb, bidh, n_block_max - 1);
-        for (int n_block = n_block_max - 2; n_block > 0; n_block--) {
-            compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Has_alibi, Is_even_M, Is_even_K, false, false>(params, bidb, bidh, n_block);
-        }
-        compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Has_alibi, Is_even_M, Is_even_K, false, true>(params, bidb, bidh, 0);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, typename Params>
-inline __device__ void compute_dq_dk_dv_seqk_parallel(const Params &params) {
-
-    // The block index for the batch.
-    const int bidb = blockIdx.y;
-    // The block index for the head.
-    const int bidh = blockIdx.z;
-
-    // If deterministic, each thread block will do atomicAdd to a different dQ_accum buffer.
-    for (int n_block = blockIdx.x; n_block < (params.seqlen_k + Kernel_traits::kBlockN - 1) / Kernel_traits::kBlockN; n_block += gridDim.x) {
-        if (sizeof_bits_v<typename Kernel_traits::Element> == 8)
-            compute_dq_dk_dv_1colblock_fp8<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, false, false, /*Seq_parallel=*/true>(params, bidb, bidh, n_block);
-        else
-            compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, false, false, /*Seq_parallel=*/true>(params, bidb, bidh, n_block);
-    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

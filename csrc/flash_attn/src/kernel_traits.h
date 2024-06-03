@@ -59,6 +59,7 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_r
          typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_fwd_kernel_traits : public Base {
     using Element = typename Base::Element;
+    using OutElement = Element;
     using ElementAccum = typename Base::ElementAccum;
     using index_t = typename Base::index_t;
     static constexpr bool Has_cp_async = Base::Has_cp_async;
@@ -217,6 +218,7 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_,
          typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_bwd_kernel_traits : public Base {
     using Element = typename Base::Element;
+    using OutElement = Element;
     using ElementAccum = typename Base::ElementAccum;
     using index_t = typename Base::index_t;
     static constexpr bool Has_cp_async = Base::Has_cp_async;
@@ -415,6 +417,10 @@ struct Flash_bwd_kernel_traits : public Base {
         make_tiled_copy(Copy_Atom<DefaultCopy, elem_type>{},
                         GmemLayoutAtom{},
                         Layout<Shape < _1, _8>>{}));  // Val layout, 8 vals per store
+    using GmemTiledCopyO = decltype(
+        make_tiled_copy(Copy_Atom<DefaultCopy, elem_type>{},
+                        GmemLayoutAtom{},
+                        Layout<Shape<_1, _8>>{}));
     using GmemTiledCopydKV = decltype(
         make_tiled_copy(Copy_Atom<DefaultCopy, elem_type>{},
                         GmemLayoutAtom{},
