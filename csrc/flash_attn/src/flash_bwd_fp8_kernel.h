@@ -102,9 +102,7 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)), typename Kernel_traits::SmemLayoutQ{});
     Tensor sQt = make_tensor(sQ.data() + size(sQ), typename Kernel_traits::SmemLayoutQt{});
     // Double buffer for sQ
-    Tensor sQ2 = make_tensor(sQt.data() + size(sQt), typename Kernel_traits::SmemLayoutQ{});
-    Tensor sQt2 = make_tensor(sQ2.data() + size(sQ2), typename Kernel_traits::SmemLayoutQt{});
-    Tensor sK = make_tensor((Double_buffer ? sQt2.data() : sQt.data()) + size(sQt), typename Kernel_traits::SmemLayoutK{});
+    Tensor sK = make_tensor(sQ.data() + (Double_buffer ? 2 : 1) * size(sQ) * 2, typename Kernel_traits::SmemLayoutK{});
     Tensor sKt = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKt{});
     Tensor sV = make_tensor(sKt.data() + size(sKt), typename Kernel_traits::SmemLayoutV{});
     Tensor sdO = make_tensor(sV.data() + size(sV), typename Kernel_traits::SmemLayoutdO{});
@@ -142,7 +140,6 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     typename Kernel_traits::TiledGMmaS tiled_gmma_s;
     auto thr_gmma_s = tiled_gmma_s.get_thread_slice(tidx);
     Tensor tSrQ = thr_gmma_s.partition_fragment_A(sQ);
-    Tensor tSrQ2 = thr_gmma_s.partition_fragment_A(sQ2);
     Tensor tSrK = thr_gmma_s.partition_fragment_B(sK);
 
     typename Kernel_traits::TiledGMmadP tiled_gmma_dp;
@@ -154,7 +151,6 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     auto thr_gmma_dk = tiled_gmma_dk.get_thread_slice(tidx);
     Tensor tdKrdSt = thr_gmma_dk.partition_fragment_A(sdSt);
     Tensor tdKrQt = thr_gmma_dk.partition_fragment_B(sQt);
-    Tensor tdKrQt2 = thr_gmma_dk.partition_fragment_B(sQt2);
 
     typename Kernel_traits::TiledGMmadV tiled_gmma_dv;
     auto thr_gmma_dv = tiled_gmma_dv.get_thread_slice(tidx);
@@ -183,24 +179,20 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     auto smem_tiled_copy_X = typename Kernel_traits::SmemTiledCopyX{};
     auto smem_thr_copy_X = smem_tiled_copy_X.get_thread_slice(tidx);
     Tensor tcQsQ = smem_thr_copy_X.partition_S(sQ);
-    Tensor tcQsQ2 = smem_thr_copy_X.partition_S(sQ2);
     Tensor tcKsK = smem_thr_copy_X.partition_S(sK);
     Tensor tcdOsdO = smem_thr_copy_X.partition_S(sdO);
 
     auto smem_tiled_copy_Xt = typename Kernel_traits::SmemTiledCopyXt{};
     auto smem_thr_copy_Xt = smem_tiled_copy_Xt.get_thread_slice(tidx);
     Tensor tcQsQt = smem_thr_copy_Xt.partition_D(sQt);
-    Tensor tcQsQt2 = smem_thr_copy_Xt.partition_D(sQt2);
     Tensor tcKsKt = smem_thr_copy_Xt.partition_D(sKt);
     Tensor tcdOsdOt = smem_thr_copy_Xt.partition_D(sdOt);
 
     Tensor tcQrQ = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcQsQ), shape<2>(tcQsQ)));
-    Tensor tcQrQ2 = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcQsQ2), shape<2>(tcQsQ2)));
     Tensor tcKrK = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcKsK), shape<2>(tcKsK)));
     Tensor tcdOrdO = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcdOsdO), shape<2>(tcdOsdO)));
 
     Tensor tcQrQt = make_tensor(tcQrQ.data(), make_layout(layout<0>(tcQrQ), layout<2>(tcQrQ), layout<1>(tcQrQ)));
-    Tensor tcQrQt2 = make_tensor(tcQrQ2.data(), make_layout(layout<0>(tcQrQ2), layout<2>(tcQrQ2), layout<1>(tcQrQ2)));
     Tensor tcKrKt = make_tensor(tcKrK.data(), make_layout(layout<0>(tcKrK), layout<2>(tcKrK), layout<1>(tcKrK)));
     Tensor tcdOrdOt = make_tensor(tcdOrdO.data(), make_layout(layout<0>(tcdOrdO), layout<2>(tcdOrdO), layout<1>(tcdOrdO)));
 
@@ -281,8 +273,14 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         return;
     }
 
-    if (Double_buffer && m_block % 2 == 1) {  // Double buffer for sQ
-        tQsQ.data() = tQsQ.data() + size(sQ) * 2;
+    if (Double_buffer && m_block % 2 == 1) {
+        // Double buffer for sQ
+        const int sQ_offset = size(sQ) * 2;
+        tQsQ.data() = tQsQ.data() + sQ_offset;
+        tSrQ.data() = tSrQ.data() + sQ_offset / 16;
+        tdKrQt.data() = tdKrQt.data() + sQ_offset / 16;
+        tcQsQ.data() = tcQsQ.data() + sQ_offset;
+        tcQsQt.data() = tcQsQt.data() + sQ_offset;
     }
 
     if (params.deterministic) { __syncthreads(); }
@@ -342,22 +340,16 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         #pragma unroll
         for (int mi = 0; mi < size(lse); ++mi) { dP_sum(mi) = gdPsum(get<0>(taccScS_row(mi))); }
 
-        flash::gemm(tiled_gmma_s, (!Double_buffer || m_block % 2 == 0) ? tSrQ : tSrQ2, tSrK, tSrS_gmma);
+        flash::gemm(tiled_gmma_s, tSrQ, tSrK, tSrS_gmma);
 
         if (m_block == m_block_max - 1) {
             cute::copy(smem_tiled_copy_X, tcKsK, tcKrK);
             permute_fp8(tcKrK);
             cute::copy(smem_tiled_copy_Xt, tcKrKt, tcKsKt);
         }
-        if (Double_buffer && m_block % 2 == 1) {
-            cute::copy(smem_tiled_copy_X, tcQsQ2, tcQrQ2);
-            permute_fp8(tcQrQ2);
-            cute::copy(smem_tiled_copy_Xt, tcQrQt2, tcQsQt2);
-        } else {
-            cute::copy(smem_tiled_copy_X, tcQsQ, tcQrQ);
-            permute_fp8(tcQrQ);
-            cute::copy(smem_tiled_copy_Xt, tcQrQt, tcQsQt);
-        }
+        cute::copy(smem_tiled_copy_X, tcQsQ, tcQrQ);
+        permute_fp8(tcQrQ);
+        cute::copy(smem_tiled_copy_Xt, tcQrQt, tcQsQt);
         cute::copy(smem_tiled_copy_X, tcdOsdO, tcdOrdO);
         permute_fp8(tcdOrdO);
         cute::copy(smem_tiled_copy_Xt, tcdOrdOt, tcdOsdOt);
@@ -482,7 +474,7 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         #pragma unroll
         for (int i = 0; i < size(acc_dq); ++i) { atomicAdd(&tdQgdQaccum(i), acc_dq(i)); }
 
-        flash::gemm(tiled_gmma_dk, tdKrdSt, (!Double_buffer || m_block % 2 == 0) ? tdKrQt : tdKrQt2, tdKrdK_gmma);
+        flash::gemm(tiled_gmma_dk, tdKrdSt, tdKrQt, tdKrdK_gmma);
         if (!Double_buffer && m_block > m_block_min) {
             __syncthreads();
             // Advance gQ
@@ -491,6 +483,14 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
             flash::cp_async_fence();
         }
 
+        if (Double_buffer) {
+            // Double buffer for sQ
+            const int sQ_offset = m_block % 2 == 0 ? size(sQ) * 2 : -size(sQ) * 2;
+            tSrQ.data() = tSrQ.data() + sQ_offset / 16;
+            tdKrQt.data() = tdKrQt.data() + sQ_offset / 16;
+            tcQsQ.data() = tcQsQ.data() + sQ_offset;
+            tcQsQt.data() = tcQsQt.data() + sQ_offset;
+        }
     }
 
     // Epilogue

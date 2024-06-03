@@ -590,19 +590,14 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
     Tensor sV = make_tensor(Kernel_traits::Share_KV ? sK.data() : sK.data() + size(sK), typename Kernel_traits::SmemLayoutV{});
     Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVt{});
     // Double buffer for Shared_KV
-    Tensor sK2 = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutK{});
-    Tensor sV2 = make_tensor(sK2.data(), typename Kernel_traits::SmemLayoutV{});
-    Tensor sVt2 = make_tensor(sV2.data(), typename Kernel_traits::SmemLayoutVt{});
 
     auto smem_tiled_copy_V = typename Kernel_traits::SmemTiledCopyV{};
     auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
     Tensor tcVsV = smem_thr_copy_V.partition_S(sV);
-    Tensor tcVsV2 = smem_thr_copy_V.partition_S(sV2);
 
     auto smem_tiled_copy_Vt = typename Kernel_traits::SmemTiledCopyVt{};
     auto smem_thr_copy_Vt = smem_tiled_copy_Vt.get_thread_slice(tidx);
     Tensor tcVsVt = smem_thr_copy_Vt.partition_D(sVt);
-    Tensor tcVsVt2 = smem_thr_copy_Vt.partition_D(sVt2);
 
     Tensor tcVrV = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcVsV), shape<2>(tcVsV)));
     Tensor tcVrVt = make_tensor(tcVrV.data(), make_layout(layout<0>(tcVrV), layout<2>(tcVrV), layout<1>(tcVrV)));
@@ -628,14 +623,12 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
     Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
     Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
-    Tensor tSrK2  = thr_mma.partition_fragment_B(sK2);                           // (MMA,MMA_N,MMA_K)
     Tensor tSrS = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_s = make_tensor(tSrS.data(), flash::convert_gmma_to_mma_tensor(tSrS.layout()));  // (4, MMA_M, X)
 
     typename Kernel_traits::TiledMmaO tiled_mma_o;
     auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
     Tensor tOrVt  = thr_mma_o.partition_fragment_B(sVt);                // (MMA, MMA_K,MMA_N)
-    Tensor tOrVt2  = thr_mma_o.partition_fragment_B(sVt2);                // (MMA, MMA_K,MMA_N)
     Tensor tOrO = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_o = make_tensor(tOrO.data(), flash::convert_gmma_to_mma_tensor(tOrO.layout()));  // (4, MMA_M, X)
 
@@ -681,6 +674,17 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
                                        binfo.actual_seqlen_q - m_block * kBlockM);
 
     int n_block = n_block_max - 1;
+
+    if (Kernel_traits::Share_KV && n_block % 2 == 1) {
+        // Double buffer for sK
+        const int sK_offset = size(sK);
+        tKsK.data() = tKsK.data() + sK_offset;
+        tSrK.data() = tSrK.data() + sK_offset / 16;
+        tOrVt.data() = tOrVt.data() + sK_offset / 16;
+        tcVsV.data() = tcVsV.data() + sK_offset;
+        tcVsVt.data() = tcVsVt.data() + sK_offset;
+    }
+
     flash::copy<Is_even_MN, Is_even_K, Kernel_traits::Share_KV>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV,
                                                                 binfo.actual_seqlen_k - n_block * kBlockN);
     cute::cp_async_fence();
@@ -705,7 +709,6 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
 
     // If not even_N, then seqlen_k might end in the middle of a block. In that case we need to
     // mask 2 blocks (e.g. when kBlockM == kBlockN), not just 1.
-    bool sK_flag = true, sV_flag = true;
 
     auto LoadK = [&](int n_block) {
         if (n_block > n_block_min) {
@@ -722,7 +725,9 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
                 tKgK.data() = tKgK.data() + offset;
             }
             if (Kernel_traits::Share_KV) {
-                tKsK.data() = tKsK.data() + (sK_flag ? size(sK) : -size(sK));
+                // Double buffer for sK
+                const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
+                tKsK.data() = tKsK.data() + sK_offset;
             }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
             cute::cp_async_fence();
@@ -765,7 +770,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
         if (Kernel_traits::Share_KV) { LoadK(n_block); }
 
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
-            flash::gemm(tiled_mma, tSrQ, sK_flag ? tSrK : tSrK2, tSrS);
+            flash::gemm(tiled_mma, tSrQ, tSrK, tSrS);
             // if (cute::thread0()) { print(acc_s); }
 
             mask.template apply_mask<Is_causal, Is_even_MN>(
@@ -781,9 +786,8 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
         }
 
         if (!Kernel_traits::Share_KV) { LoadK(n_block); }
-        if (Kernel_traits::Share_KV) { sK_flag = !sK_flag;}
 
-        cute::copy(smem_tiled_copy_V, sV_flag ? tcVsV : tcVsV2, tcVrV);
+        cute::copy(smem_tiled_copy_V, tcVsV, tcVrV);
         permute_fp8(tcVrV);
 
         Tensor rP = make_tensor<Element>(acc_s.layout());
@@ -809,7 +813,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
             cute::copy(tPsP, rP);
             cute::copy(tScale_osScale_o, scale_o);
         }
-        cute::copy(smem_tiled_copy_Vt, tcVrVt, sV_flag ? tcVsVt : tcVsVt2);
+        cute::copy(smem_tiled_copy_Vt, tcVrVt, tcVsVt);
         __syncthreads();
         flash::rescale_o(acc_o, scale_o);
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
@@ -818,10 +822,15 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
         if (sizeof_bits_v<Element> == 8) { reg2reg(tOrP); }
 
-        flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
+        flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO);
 
         if (Kernel_traits::Share_KV) {
-            sV_flag = !sV_flag;
+            // Double buffer for sK
+            const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
+            tSrK.data() = tSrK.data() + sK_offset / 16;
+            tOrVt.data() = tOrVt.data() + sK_offset / 16;
+            tcVsV.data() = tcVsV.data() + sK_offset;
+            tcVsVt.data() = tcVsVt.data() + sK_offset;
         }
 
         // This check is at the end of the loop since we always have at least 1 iteration
@@ -856,7 +865,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
 
 
         if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
-            flash::gemm(tiled_mma, tSrQ, sK_flag ? tSrK : tSrK2, tSrS);
+            flash::gemm(tiled_mma, tSrQ, tSrK, tSrS);
         }
 
         if (!Kernel_traits::Share_KV) {
@@ -866,9 +875,8 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
 
         if (!Kernel_traits::Share_KV) { LoadK(n_block); }
         if (Kernel_traits::Share_KV) { LoadK(n_block); }
-        if (Kernel_traits::Share_KV) { sK_flag = !sK_flag;}
 
-        cute::copy(smem_tiled_copy_V, sV_flag ? tcVsV : tcVsV2, tcVrV);
+        cute::copy(smem_tiled_copy_V, tcVsV, tcVrV);
         permute_fp8(tcVrV);
 
         Tensor rP = make_tensor<Element>(acc_s.layout());
@@ -893,7 +901,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
             cute::copy(tPsP, rP);
             cute::copy(tScale_osScale_o, scale_o);
         }
-        cute::copy(smem_tiled_copy_Vt, tcVrVt, sV_flag ? tcVsVt : tcVsVt2);
+        cute::copy(smem_tiled_copy_Vt, tcVrVt, tcVsVt);
         __syncthreads();
         flash::rescale_o(acc_o, scale_o);
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
@@ -902,10 +910,15 @@ inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, 
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
         if (sizeof_bits_v<Element> == 8) { reg2reg(tOrP); }
 
-        flash::gemm(tiled_mma_o, tOrP, sV_flag ? tOrVt : tOrVt2, tOrO);
+        flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO);
 
         if (Kernel_traits::Share_KV) {
-            sV_flag = !sV_flag;
+            // Double buffer for sK
+            const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
+            tSrK.data() = tSrK.data() + sK_offset / 16;
+            tOrVt.data() = tOrVt.data() + sK_offset / 16;
+            tcVsV.data() = tcVsV.data() + sK_offset;
+            tcVsVt.data() = tcVsVt.data() + sK_offset;
         }
     }
 
