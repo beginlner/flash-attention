@@ -31,14 +31,6 @@
 template<typename Kernel_traits, __VA_ARGS__> \
 __global__ void __launch_bounds__(256, 1, 1) kernelName(KERNEL_PARAM_MODIFIER const Flash_bwd_params params)
 
-DEFINE_FLASH_BACKWARD_KERNEL(flash_bwd_dq_dk_dv_loop_kernel, bool Is_dropout, bool Is_causal, bool Has_alibi, bool Is_even_M, bool Is_even_K) {
-    #if defined(ARCH_SUPPORTS_FLASH)
-       flash::compute_dq_dk_dv<Kernel_traits, Is_dropout, Is_causal, Has_alibi, Is_even_M, Is_even_K>(params);
-    #else
-        FLASH_UNSUPPORTED_ARCH
-    #endif
-}
-
 DEFINE_FLASH_BACKWARD_KERNEL(flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K) {
     #if defined(ARCH_SUPPORTS_FLASH)
         static_assert(!(Is_causal && Is_local));  // If Is_local is true, Is_causal should be false
@@ -48,25 +40,14 @@ DEFINE_FLASH_BACKWARD_KERNEL(flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel, bool 
     #endif
 }
 
-
 template<bool Clear_dQaccum=true, typename Kernel_traits>
 __global__ void flash_bwd_dot_do_o_kernel(const Flash_bwd_params params) {
     flash::compute_dot_do_o<Clear_dQaccum, Kernel_traits>(params);
 }
 
 template<typename Kernel_traits>
-__global__ void flash_bwd_clear_dkvaccum_kernel(const Flash_bwd_params params) {
-    flash::clear_dKVaccum<Kernel_traits>(params);
-}
-
-template<typename Kernel_traits>
 __global__ void flash_bwd_convert_dq_kernel(const Flash_bwd_params params, const int nsplits) {
     flash::convert_dQ<Kernel_traits>(params, nsplits);
-}
-
-template<typename Kernel_traits>
-__global__ void flash_bwd_convert_dkv_kernel(const Flash_bwd_params params) {
-    flash::convert_dKV<Kernel_traits>(params);
 }
 
 template<typename Kernel_traits, bool Is_dropout>
