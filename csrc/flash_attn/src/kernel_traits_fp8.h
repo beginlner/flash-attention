@@ -121,7 +121,7 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
     using SmemLayoutO = decltype(tile_to_shape(
             SmemLayoutAtomO{},
             Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
-    using SmemCopyAtomO = Copy_Atom<DefaultCopy, OutElement>;
+    using SmemCopyAtomO = Copy_Atom<SM90_U32x4_STSM_N, OutElement>;
     using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;
 
     static_assert(kBlockN % 64 == 0);
@@ -165,11 +165,6 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
     make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
                     GmemLayoutAtom{},
                     Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{}));  // Val layout, 8 vals per read
-
-    using SmemTiledCopyK = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
-                    GmemLayoutAtom{},
-                    Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{}));
 
     static constexpr int kGmemElemsPerLoadO = sizeof(cute::uint128_t) / sizeof(OutElement);
     static_assert(kHeadDimV % kGmemElemsPerLoadO == 0, "kHeadDim must be a multiple of kGmemElemsPerLoadO");
@@ -315,7 +310,7 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
             getSmemLayoutK<OutElement, kHeadDimV>(),
             make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
-    using SmemCopyAtomdKV = Copy_Atom<DefaultCopy, OutElement>;
+    using SmemCopyAtomdKV = Copy_Atom<SM90_U32x4_STSM_N, OutElement>;
 
     // Transpose Q, K and dO in shared memory
     static_assert(kBlockM % 64 == 0);
@@ -392,7 +387,7 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     using SmemLayoutdQ = decltype(tile_to_shape(
             GMMA::Layout_K_SW64_Atom<OutElement>{},
             make_shape(Int<kBlockM>{}, Int<kHeadDim>{})));
-    using SmemCopyAtomdQ = Copy_Atom<DefaultCopy, OutElement>;
+    using SmemCopyAtomdQ = Copy_Atom<SM90_U32x4_STSM_N, OutElement>;
     static constexpr int kSmemdQSize = size(SmemLayoutdQ{}) * sizeof(OutElement);
 
     using GmemTiledCopydQ = decltype(
