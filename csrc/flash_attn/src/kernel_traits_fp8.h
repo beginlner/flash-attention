@@ -305,11 +305,11 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     composition(SmemLayoutPt{}, make_layout(Shape<Int<kBlockM>, Int<kBlockN>>{}, GenRowMajor{})));
 
     using SmemLayoutdK = decltype(tile_to_shape(
-            getSmemLayoutK<OutElement, kHeadDim>(),
+            getSmemLayoutK<OutElement, kHeadDim / (kNWarps / AtomLayoutNdKV)>(),
             make_shape(Int<kBlockN>{}, Int<kHeadDim>{})));
 
     using SmemLayoutdV = decltype(tile_to_shape(
-            getSmemLayoutK<OutElement, kHeadDimV>(),
+            getSmemLayoutK<OutElement, kHeadDimV / (kNWarps / AtomLayoutNdKV)>(),
             make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
     using SmemCopyAtomdKV = Copy_Atom<SM90_U32x4_STSM_N, OutElement>;

@@ -27,10 +27,18 @@ using namespace cute;
 template<class... Args, class TiledGMMA>
 inline __device__ auto custom_tiled_copy(Copy_Atom<Args...> const& copy_atom, TiledGMMA const& tiled_gmma) {
     auto tv_layout = tiled_gmma.get_layoutC_TV();
-    auto new_tv_stride = make_stride(make_stride(stride<0, 0>(tv_layout), _2{}, stride<0, 2>(tv_layout), stride<0, 3>(tv_layout)),
-                                     make_stride(make_stride(_1{}, stride<1, 0, 0>(tv_layout), stride<1, 0, 2>(tv_layout)), stride<1, 1>(tv_layout)));
-    auto new_tv_layout = make_layout(shape(tv_layout), new_tv_stride);
-    return make_tiled_copy_impl(copy_atom, new_tv_layout, make_shape(tile_size<0>(tiled_gmma),tile_size<1>(tiled_gmma)));
+    if constexpr (rank<0>(tv_layout) == _4{}) {
+        auto new_tv_stride = make_stride(make_stride(stride<0, 0>(tv_layout), _2{}, stride<0, 2>(tv_layout), stride<0, 3>(tv_layout)),
+                                         make_stride(make_stride(_1{}, stride<1, 0, 0>(tv_layout), stride<1, 0, 2>(tv_layout)), stride<1, 1>(tv_layout)));
+        auto new_tv_layout = make_layout(shape(tv_layout), new_tv_stride);
+        return make_tiled_copy_impl(copy_atom, new_tv_layout, make_shape(tile_size<0>(tiled_gmma),tile_size<1>(tiled_gmma)));
+    } else {
+        static_assert(rank<0>(tv_layout) == _3{});
+        auto new_tv_stride = make_stride(make_stride(stride<0, 0>(tv_layout), _2{}, stride<0, 2>(tv_layout)),
+                                         make_stride(make_stride(_1{}, stride<1, 0, 0>(tv_layout), stride<1, 0, 2>(tv_layout)), stride<1, 1>(tv_layout)));
+        auto new_tv_layout = make_layout(shape(tv_layout), new_tv_stride);
+        return make_tiled_copy_impl(copy_atom, new_tv_layout, make_shape(tile_size<0>(tiled_gmma),tile_size<1>(tiled_gmma)));
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

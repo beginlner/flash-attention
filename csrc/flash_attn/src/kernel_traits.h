@@ -218,6 +218,7 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_,
          typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_bwd_kernel_traits : public Base {
     using Element = typename Base::Element;
+    using GradElement = Element;
     using OutElement = Element;
     using ElementAccum = typename Base::ElementAccum;
     using index_t = typename Base::index_t;

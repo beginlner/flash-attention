@@ -264,6 +264,10 @@ void run_mha_bwd_fp8_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
     HEADDIMV_SWITCH((params.d_v == params.d ? 0 : params.d_v), [&] {
         DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
             run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 64, 128, 8, 4, 8, 4, false, false, T, cutlass::float_e5m2_t, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
+//            run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 64, 64, 8, 4, 4, 4, false, false, T, cutlass::float_e5m2_t, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
+//            run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 64, 128, 8, 4, 4, 4, false, false, T, cutlass::float_e5m2_t, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
+//            run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 128, 64, 8, 4, 4, 4, false, false, T, cutlass::float_e5m2_t, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
+//            run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 128, 64, 8, 8, 4, 8, false, false, T, cutlass::float_e5m2_t, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
         });
     });
 }

@@ -239,6 +239,11 @@ struct ReorgCFp8toAFp8SharedTransposed {
         int laneId = cutlass::canonical_lane_idx();
         upper_src = upper_map[laneId / 4] * 4 + laneId % 4;
         lower_src = lower_map[laneId / 4] * 4 + laneId % 4;
+    }
+
+    template <typename Tensor>
+    __forceinline__ __device__ void operator()(Tensor &tensor) {
+        int laneId = cutlass::canonical_lane_idx();
         int tId = laneId / 4;
         if (tId % 2 == 0) {
             selectorEx0 = 0x5410;
@@ -254,10 +259,7 @@ struct ReorgCFp8toAFp8SharedTransposed {
             selectorEx4 = 0x1504;
             selectorEx5 = 0x3726;
         }
-    }
 
-    template <typename Tensor>
-    __forceinline__ __device__ void operator()(Tensor &tensor) {
         auto data = tensor.data();
         int n = 0;
 
