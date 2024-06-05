@@ -218,6 +218,71 @@ __forceinline__ __device__ void gemm_rs(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tC
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 00 01|10 11|20 21|30 31|40 41|50 51|60 61|70 71
+// byte_perm if i%2!=0
+// 00 01|11 10|20 21|31 30|40 41|51 50|60 61|71 70
+// shfl_sync
+// 00 10|20 30|40 50|60 70|11 01|31 21|51 41|71 61
+// byte_perm if i>n/2
+// 00 10|20 30|40 50|60 70|01 11|21 31|41 51|61 71
+struct ReorgCFp8toAFp8SharedTransposed {
+    uint32_t selectorEx0;
+    uint32_t selectorEx1;
+    uint32_t selectorEx4;
+    uint32_t selectorEx5;
+    int upper_src;
+    int lower_src;
+    int upper_map[8] = {0,2,4,6, 1, 3, 5, 7};
+    int lower_map[8] = {1,3,5,7, 0, 2, 4, 6};
+
+    __forceinline__ __device__ ReorgCFp8toAFp8SharedTransposed() {
+        int laneId = cutlass::canonical_lane_idx();
+        upper_src = upper_map[laneId / 4] * 4 + laneId % 4;
+        lower_src = lower_map[laneId / 4] * 4 + laneId % 4;
+        int tId = laneId / 4;
+        if (tId % 2 == 0) {
+            selectorEx0 = 0x5410;
+            selectorEx1 = 0x7632;
+        } else {
+            selectorEx0 = 0x7632;
+            selectorEx1 = 0x5410;
+        }
+        if (tId < 4) {
+            selectorEx4 = 0x5140;
+            selectorEx5 = 0x7362;
+        } else {
+            selectorEx4 = 0x1504;
+            selectorEx5 = 0x3726;
+        }
+    }
+
+    template <typename Tensor>
+    __forceinline__ __device__ void operator()(Tensor &tensor) {
+        auto data = tensor.data();
+        int n = 0;
+
+#pragma unroll
+        for (int i = 0; i < size(tensor) / 8; ++i) {
+            auto upper = *reinterpret_cast<uint32_t*>(&data[n]);
+            auto lower = *reinterpret_cast<uint32_t*>(&data[n+4]);
+
+            auto upper0 = __byte_perm(upper, lower, selectorEx0);
+            auto lower0 = __byte_perm(upper, lower, selectorEx1);
+
+            upper0 = __shfl_sync(uint32_t(-1),upper0, upper_src);
+            lower0 = __shfl_sync(uint32_t(-1),lower0, lower_src);
+
+            auto *data_32bit = reinterpret_cast<uint32_t *>(&data[n]);
+            data_32bit[0] = __byte_perm(upper0, lower0, selectorEx4);
+            data_32bit[1] = __byte_perm(upper0, lower0, selectorEx5);
+
+            n += 8;
+        }
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Need this register byte permute/shuffle to match register layout of
 // (FP8 downcasted) accumulator of GEMM-I to FP8 operand A of GEMM-II.
 struct ReorgCFp8toAFp8 {
@@ -225,13 +290,15 @@ struct ReorgCFp8toAFp8 {
     int selectorEx1;
     int selectorEx4;
     int selectorEx5;
+    int upper_src;
+    int lower_src;
     int upper_map[4] = {0,3,1,2};
     int lower_map[4] = {1,2,0,3};
 
-
-    CUTLASS_DEVICE ReorgCFp8toAFp8() {
+    __forceinline__ __device__  ReorgCFp8toAFp8() {
         int laneId = cutlass::canonical_lane_idx();
-
+        upper_src = upper_map[laneId % 4];
+        lower_src = lower_map[laneId % 4];
         if (laneId % 4 == 0 || laneId % 4 == 3) {
             selectorEx0 = 0x3210;
             selectorEx1 = 0x7654;
@@ -243,44 +310,28 @@ struct ReorgCFp8toAFp8 {
             selectorEx4 = 0x1054;
             selectorEx5 = 0x3276;
         }
-
     }
 
-    template <typename Fragment>
-    CUTLASS_DEVICE auto operator()(Fragment &accum) {
-
-        using namespace cute;
-
-        // First update `mi` to the max per-row
-        //
-        auto VT = shape<0>(accum); // number of vector elements per tile.
-        auto MT = shape<1>(accum); // number of tiles along M.
-        auto NT = shape<2>(accum); // number of tiles along N.
-
-        auto data = accum.data();
+    template <typename Tensor>
+    __forceinline__ __device__ auto operator()(Tensor &tensor) {
+        auto data = tensor.data();
         int n = 0;
 
 #pragma unroll
-        for (int i = 0; i < MT; ++i) {
+        for (int i = 0; i < size(tensor) / 8; ++i) {
+            auto upper = *reinterpret_cast<uint32_t*>(&data[n]);
+            auto lower = *reinterpret_cast<uint32_t*>(&data[n+4]);
 
-            // Traverse 2-rows + 2-cols (2x2) simultaneously.
+            auto upper0 = __byte_perm(upper, lower, selectorEx0);
+            auto lower0 = __byte_perm(upper, lower, selectorEx1);
+            upper0 = __shfl_sync(uint32_t(-1),upper0, upper_src,4);
+            lower0 = __shfl_sync(uint32_t(-1),lower0, lower_src,4);
 
-#pragma unroll
-            for (int k = 0; k < NT * size(VT) / 8; ++k) {
+            auto *data_32bit = reinterpret_cast<uint32_t *>(&data[n]);
+            data_32bit[0] = __byte_perm(upper0, lower0, selectorEx4);
+            data_32bit[1] = __byte_perm(upper0, lower0, selectorEx5);
 
-                auto upper = *reinterpret_cast<uint32_t*>(&data[n]);
-                auto lower = *reinterpret_cast<uint32_t*>(&data[n+4]);
-
-                auto upper0 = __byte_perm(upper, lower, selectorEx0);
-                auto lower0 = __byte_perm(upper, lower, selectorEx1);
-                upper0 = __shfl_sync(uint32_t(-1),upper0, upper_map[threadIdx.x%4],4);
-                lower0 = __shfl_sync(uint32_t(-1),lower0, lower_map[threadIdx.x%4],4);
-
-                uint32_t *data_32bit = reinterpret_cast<uint32_t *>(&data[n]);
-                data_32bit[0] = __byte_perm(upper0, lower0, selectorEx4);
-                data_32bit[1] = __byte_perm(upper0, lower0, selectorEx5);
-                n += 8;
-            }
+            n += 8;
         }
     }
 };

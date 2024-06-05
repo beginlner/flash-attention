@@ -24,6 +24,17 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+template<class... Args, class TiledGMMA>
+inline __device__ auto custom_tiled_copy(Copy_Atom<Args...> const& copy_atom, TiledGMMA const& tiled_gmma) {
+    auto tv_layout = tiled_gmma.get_layoutC_TV();
+    auto new_tv_stride = make_stride(make_stride(stride<0, 0>(tv_layout), _2{}, stride<0, 2>(tv_layout), stride<0, 3>(tv_layout)),
+                                     make_stride(make_stride(_1{}, stride<1, 0, 0>(tv_layout), stride<1, 0, 2>(tv_layout)), stride<1, 1>(tv_layout)));
+    auto new_tv_layout = make_layout(shape(tv_layout), new_tv_stride);
+    return make_tiled_copy_impl(copy_atom, new_tv_layout, make_shape(tile_size<0>(tiled_gmma),tile_size<1>(tiled_gmma)));
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_first, bool Is_last, bool Seq_parallel=false, typename Params>
 inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, const int bidb, const int bidh, const int n_block) {
     static_assert(!Is_dropout);
@@ -171,9 +182,14 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     // Copy Atom retiling
     //
 
-    Tensor tPsPt_t = thr_gmma_s.partition_C(sPt_t);
+    auto smem_tiled_copy_PdS = custom_tiled_copy(Copy_Atom<SM90_U16x8_STSM_T, Element>{}, tiled_gmma_s);
+    auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(tidx);
+    Tensor tPsPt_t = smem_thr_copy_PdS.partition_D(sPt_t);
+    Tensor tdSsdSt_t = smem_thr_copy_PdS.partition_D(sdSt_t);
+
+    auto reg2reg = ReorgCFp8toAFp8SharedTransposed();
+
     Tensor tdSsdS = thr_gmma_dp.partition_C(sdS);
-    Tensor tdSsdSt_t = thr_gmma_dp.partition_C(sdSt_t);
 
     // Transpose Q, K and dO in shared memory
     auto smem_tiled_copy_X = typename Kernel_traits::SmemTiledCopyX{};
@@ -404,7 +420,9 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         flash::scale_apply_exp2</*scale_max=*/false>(scores, lse, params.scale_softmax_log2);
         // Convert scores from fp32 to fp8
         Tensor tSrS_gmma_fp8 = flash::convert_type<Element>(tSrS_gmma);
-        cute::copy(tSrS_gmma_fp8, tPsPt_t);
+        reg2reg(tSrS_gmma_fp8);
+        Tensor tPrP = smem_thr_copy_PdS.retile_S(tSrS_gmma_fp8);
+        cute::copy(smem_tiled_copy_PdS, tPrP, tPsPt_t);
 
         Tensor tdPrdP_gmma = partition_fragment_C(tiled_gmma_dp, Shape<Int<kBlockM>, Int<kBlockN>>{});
         Tensor acc_dp = make_tensor(tdPrdP_gmma.data(), flash::convert_gmma_to_mma_tensor(tdPrdP_gmma.layout()));  // (MMA=4, MMA_N, MMA_N)
@@ -447,7 +465,9 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         // Convert dS from fp32 to fp8
         Tensor tdPrdP_gmma_fp8 = flash::convert_type<Element>(tdPrdP_gmma);
         cute::copy(tdPrdP_gmma_fp8, tdSsdS);
-        cute::copy(tdPrdP_gmma_fp8, tdSsdSt_t);
+        reg2reg(tdPrdP_gmma_fp8);
+        Tensor tdSrdS = smem_thr_copy_PdS.retile_S(tdPrdP_gmma_fp8);
+        cute::copy(smem_tiled_copy_PdS, tdSrdS, tdSsdSt_t);
         __syncthreads();
 
         flash::gemm(tiled_gmma_dv, tdVrPt, tdVrdOt, tdVrdV_gmma);
