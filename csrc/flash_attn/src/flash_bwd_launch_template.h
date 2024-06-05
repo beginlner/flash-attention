@@ -263,7 +263,7 @@ void run_mha_bwd_fp8_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
     constexpr static int Headdim = 192;
     HEADDIMV_SWITCH((params.d_v == params.d ? 0 : params.d_v), [&] {
         DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
-            run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 64, 128, 8, 4, 8, 4, false, false, T, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
+            run_flash_bwd<Flash_bwd_fp8_kernel_traits<Headdim, 64, 128, 8, 4, 8, 4, false, false, T, cutlass::float_e5m2_t, cutlass::bfloat16_t, kHeadDimV>, Is_dropout>(params, stream);
         });
     });
 }

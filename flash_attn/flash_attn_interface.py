@@ -183,7 +183,7 @@ def _flash_attn_varlen_backward(
     use_fp8=False,
 ):
     if use_fp8:
-        dout = dout.to(torch.float8_e4m3fn)
+        dout = dout.to(torch.float8_e5m2)
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]

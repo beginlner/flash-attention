@@ -193,13 +193,15 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_,
         int AtomLayoutMSdP_=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=2,
         bool Is_V_in_regs_=false, bool No_double_buffer_=false, typename elem_type=cutlass::float_e4m3_t,
-        typename out_type=cutlass::half_t,
+        typename grad_elem_type=cutlass::float_e5m2_t, typename out_type=cutlass::half_t,
         int kHeadDimV_=0,
         typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_bwd_fp8_kernel_traits : public Base {
     using Element = elem_type;
+    using GradElement = grad_elem_type;
     using OutElement = out_type;
     static_assert(sizeof_bits_v<Element> == 8);
+    static_assert(sizeof_bits_v<GradElement> == 8);
     static_assert(sizeof_bits_v<OutElement> == 16);
     using ElementAccum = typename Base::ElementAccum;
     using index_t = typename Base::index_t;
@@ -239,22 +241,22 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
             Layout<Shape<Int<AtomLayoutMSdP / 4>, Int<kNWarps / AtomLayoutMSdP>, _1>>{}));
 
     using TiledGMmadP = decltype(make_tiled_mma(
-            cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMSdP / 4)>, Int<kBlockN / (kNWarps / AtomLayoutMSdP)>, Int<kHeadDimV>>,
+            cute::GMMA::ss_op_selector<GradElement, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMSdP / 4)>, Int<kBlockN / (kNWarps / AtomLayoutMSdP)>, Int<kHeadDimV>>,
                     GMMA::Major::K, GMMA::Major::K>(),
             Layout<Shape<Int<AtomLayoutMSdP / 4>, Int<kNWarps / AtomLayoutMSdP>, _1>>{}));
 
     using TiledGMmadK = decltype(make_tiled_mma(
-            cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockN / (AtomLayoutNdKV / 4)>, Int<kHeadDim / (kNWarps / AtomLayoutNdKV)>, Int<kBlockM>>,
+            cute::GMMA::ss_op_selector<GradElement, Element, ElementAccum, Shape<Int<kBlockN / (AtomLayoutNdKV / 4)>, Int<kHeadDim / (kNWarps / AtomLayoutNdKV)>, Int<kBlockM>>,
                     GMMA::Major::K, GMMA::Major::K>(),
             Layout<Shape<Int<AtomLayoutNdKV / 4>, Int<kNWarps / AtomLayoutNdKV>, _1>>{}));
 
     using TiledGMmadV = decltype(make_tiled_mma(
-            cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockN / (AtomLayoutNdKV / 4)>, Int<kHeadDimV / (kNWarps / AtomLayoutNdKV)>, Int<kBlockM>>,
+            cute::GMMA::ss_op_selector<Element, GradElement, ElementAccum, Shape<Int<kBlockN / (AtomLayoutNdKV / 4)>, Int<kHeadDimV / (kNWarps / AtomLayoutNdKV)>, Int<kBlockM>>,
                     GMMA::Major::K, GMMA::Major::K>(),
             Layout<Shape<Int<AtomLayoutNdKV / 4>, Int<kNWarps / AtomLayoutNdKV>, _1>>{}));
 
     using TiledGMmadQ = decltype(make_tiled_mma(
-            cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMdQ / 4)>, Int<kHeadDim / (kNWarps / AtomLayoutMdQ)>, Int<kBlockN>>,
+            cute::GMMA::ss_op_selector<GradElement, Element, ElementAccum, Shape<Int<kBlockM / (AtomLayoutMdQ / 4)>, Int<kHeadDim / (kNWarps / AtomLayoutMdQ)>, Int<kBlockN>>,
                     GMMA::Major::K, GMMA::Major::K>(),
             Layout<Shape<Int<AtomLayoutMdQ / 4>, Int<kNWarps / AtomLayoutMdQ>, _1>>{}));
 
@@ -279,11 +281,11 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
             make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
     using SmemLayoutdO = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kHeadDimV>(),
+            getSmemLayoutK<GradElement, kHeadDimV>(),
             make_shape(Int<kBlockM>{}, Int<kHeadDimV>{})));
 
     using SmemLayoutdOt = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kBlockM>(),
+            getSmemLayoutK<GradElement, kBlockM>(),
             make_shape(Int<kHeadDimV>{}, Int<kBlockM>{})));
 
     using SmemLayoutPt = decltype(tile_to_shape(
@@ -293,11 +295,11 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     composition(SmemLayoutPt{}, make_layout(Shape<Int<kBlockM>, Int<kBlockN>>{}, GenRowMajor{})));
 
     using SmemLayoutdS = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kBlockN>(),
+            getSmemLayoutK<GradElement, kBlockN>(),
             make_shape(Int<kBlockM>{}, Int<kBlockN>{})));
 
     using SmemLayoutdSt = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kBlockM>(),
+            getSmemLayoutK<GradElement, kBlockM>(),
             make_shape(Int<kBlockN>{}, Int<kBlockM>{})));
     using SmemLayoutdSt_t = decltype(
     composition(SmemLayoutPt{}, make_layout(Shape<Int<kBlockM>, Int<kBlockN>>{}, GenRowMajor{})));
@@ -330,9 +332,9 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     static constexpr int kSmemQSize = (size(SmemLayoutQ{}) + size(SmemLayoutQt{})) * (No_double_buffer ? 1 : 2) * sizeof_bytes_v<Element>;
     static constexpr int kSmemKSize = (size(SmemLayoutK{}) + size(SmemLayoutKt{})) * sizeof_bytes_v<Element>;
     static constexpr int kSmemVSize = size(SmemLayoutV{}) * sizeof_bytes_v<Element>;
-    static constexpr int kSmemdOSize = (size(SmemLayoutdO{}) + size(SmemLayoutdOt{})) * sizeof_bytes_v<Element>;
+    static constexpr int kSmemdOSize = (size(SmemLayoutdO{}) + size(SmemLayoutdOt{})) * sizeof_bytes_v<GradElement>;
     static constexpr int kSmemPSize = size(SmemLayoutPt{}) * sizeof_bytes_v<Element>;
-    static constexpr int kSmemdSSize = (size(SmemLayoutdS{}) + size(SmemLayoutdSt{})) * sizeof_bytes_v<Element>;
+    static constexpr int kSmemdSSize = (size(SmemLayoutdS{}) + size(SmemLayoutdSt{})) * sizeof_bytes_v<GradElement>;
     // kSmemdKVSize is always smaller than others.
     static constexpr int kSmemSize1colblock = kSmemQSize + kSmemKSize + kSmemVSize + kSmemdOSize + kSmemPSize + kSmemdSSize;
 
@@ -368,7 +370,7 @@ struct Flash_bwd_fp8_kernel_traits : public Base {
     static constexpr int kGmemThreadsPerRow = kBlockKSmem / 8;
 
     using GmemTiledCopydO = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+    make_tiled_copy(Copy_Atom<DefaultCopy, GradElement>{},
                     GmemLayoutAtom16Bit{},
                     Layout<Shape<_1, _8>>{}));
 

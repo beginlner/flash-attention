@@ -56,7 +56,7 @@ inline __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engi
 // This is used in the case where we want to parallelize the backward across seqlen_k.
 template<bool Clear_dQaccum=true, typename Kernel_traits, typename Params>
 inline __device__ void compute_dot_do_o(const Params &params) {
-    using Element = typename Kernel_traits::Element;
+    using GradElement = typename Kernel_traits::GradElement;
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -84,7 +84,7 @@ inline __device__ void compute_dot_do_o(const Params &params) {
         + (m_block * kBlockM + (params.cu_seqlens_q == nullptr ? 0 : 128 * bidb)) * params.h * params.d_rounded + bidh * params.d_rounded;
     const index_t row_offset_dpsum = (bidb * params.h + bidh) * params.seqlen_q_rounded + m_block * kBlockM;
 
-    Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.do_ptr) + row_offset_do),
+    Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<GradElement *>(params.do_ptr) + row_offset_do),
                              Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                              make_stride(params.do_row_stride, _1{}));
     Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.o_ptr) + row_offset_o),

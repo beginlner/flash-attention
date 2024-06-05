@@ -43,6 +43,7 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     static_assert(Seq_parallel);
 
     using Element = typename Kernel_traits::Element;
+    using GradElement = typename Kernel_traits::GradElement;
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -99,7 +100,7 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.v_ptr) + row_offset_v),
                             Shape<Int<kBlockN>, Int<kHeadDimV>>{},
                             make_stride(params.v_row_stride, _1{}));
-    Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.do_ptr) + row_offset_do),
+    Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<GradElement *>(params.do_ptr) + row_offset_do),
                              Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                              make_stride(params.do_row_stride, _1{}));
     Tensor gdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dq_accum_ptr) + row_offset_dq_accum),
@@ -116,10 +117,10 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
     Tensor sK = make_tensor(sQ.data() + (Double_buffer ? 2 : 1) * size(sQ) * 2, typename Kernel_traits::SmemLayoutK{});
     Tensor sKt = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKt{});
     Tensor sV = make_tensor(sKt.data() + size(sKt), typename Kernel_traits::SmemLayoutV{});
-    Tensor sdO = make_tensor(sV.data() + size(sV), typename Kernel_traits::SmemLayoutdO{});
+    Tensor sdO = make_tensor(recast_ptr<GradElement>(sV.data() + size(sV)), typename Kernel_traits::SmemLayoutdO{});
     Tensor sdOt = make_tensor(sdO.data() + size(sdO), typename Kernel_traits::SmemLayoutdOt{});
-    Tensor sPt = make_tensor(sdOt.data() + size(sdOt), typename Kernel_traits::SmemLayoutPt{});
-    Tensor sdS = make_tensor(sPt.data() + size(sPt), typename Kernel_traits::SmemLayoutdS{});
+    Tensor sPt = make_tensor(recast_ptr<Element>(sdOt.data() + size(sdOt)), typename Kernel_traits::SmemLayoutPt{});
+    Tensor sdS = make_tensor(recast_ptr<GradElement>(sPt.data() + size(sPt)), typename Kernel_traits::SmemLayoutdS{});
     Tensor sdSt = make_tensor(sdS.data() + size(sdS), typename Kernel_traits::SmemLayoutdSt{});
 
     // View of shared memory
@@ -206,7 +207,7 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
 
     Tensor tcQrQ = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcQsQ), shape<2>(tcQsQ)));
     Tensor tcKrK = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcKsK), shape<2>(tcKsK)));
-    Tensor tcdOrdO = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcdOsdO), shape<2>(tcdOsdO)));
+    Tensor tcdOrdO = make_tensor<GradElement>(make_shape(Shape<_8, _1>{}, shape<1>(tcdOsdO), shape<2>(tcdOsdO)));
 
     Tensor tcQrQt = make_tensor(tcQrQ.data(), make_layout(layout<0>(tcQrQ), layout<2>(tcQrQ), layout<1>(tcQrQ)));
     Tensor tcKrKt = make_tensor(tcKrK.data(), make_layout(layout<0>(tcKrK), layout<2>(tcKrK), layout<1>(tcKrK)));
@@ -463,7 +464,7 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         }
 
         // Convert dS from fp32 to fp8
-        Tensor tdPrdP_gmma_fp8 = flash::convert_type<Element>(tdPrdP_gmma);
+        Tensor tdPrdP_gmma_fp8 = flash::convert_type<GradElement>(tdPrdP_gmma);
         cute::copy(tdPrdP_gmma_fp8, tdSsdS);
         reg2reg(tdPrdP_gmma_fp8);
         Tensor tdSrdS = smem_thr_copy_PdS.retile_S(tdPrdP_gmma_fp8);
