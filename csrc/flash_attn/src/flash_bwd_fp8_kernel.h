@@ -474,13 +474,13 @@ inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, cons
         // Convert dS from fp32 to fp8
         Tensor tdPrdP_gmma_fp8 = flash::convert_type<GradElement>(tdPrdP_gmma);
         cute::copy(tdPrdP_gmma_fp8, tdSsdS);
-        reg2reg(tdPrdP_gmma_fp8);
-        Tensor tdSrdS = smem_thr_copy_PdS.retile_S(tdPrdP_gmma_fp8);
-        cute::copy(smem_tiled_copy_PdS, tdSrdS, tdSsdSt_t);
         __syncthreads();
 
         flash::gemm(tiled_gmma_dv, tdVrPt, tdVrdOt, tdVrdV_gmma);
 
+        reg2reg(tdPrdP_gmma_fp8);
+        Tensor tdSrdS = smem_thr_copy_PdS.retile_S(tdPrdP_gmma_fp8);
+        cute::copy(smem_tiled_copy_PdS, tdSrdS, tdSsdSt_t);
         __syncthreads(); // Need syncthreads since we're writing to the same sdO location
 
         if (m_block > m_block_min) {
