@@ -239,6 +239,22 @@ struct ReorgCFp8toAFp8SharedTransposed {
         int laneId = cutlass::canonical_lane_idx();
         upper_src = upper_map[laneId / 4] * 4 + laneId % 4;
         lower_src = lower_map[laneId / 4] * 4 + laneId % 4;
+        // Why it is faster with the following codes?
+        int tId = laneId / 4;
+        if (tId % 2 == 0) {
+            selectorEx0 = 0x5410;
+            selectorEx1 = 0x7632;
+        } else {
+            selectorEx0 = 0x7632;
+            selectorEx1 = 0x5410;
+        }
+        if (tId < 4) {
+            selectorEx4 = 0x5140;
+            selectorEx5 = 0x7362;
+        } else {
+            selectorEx4 = 0x1504;
+            selectorEx5 = 0x3726;
+        }
     }
 
     template <typename Tensor>
