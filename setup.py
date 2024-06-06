@@ -193,6 +193,8 @@ if not SKIP_CUDA_BUILD:
                 "csrc/flash_attn/src/flash_fwd_split_hdim576_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_hdim192_fp8.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim192_fp8.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim128_fp8.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim128_fp8.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim576_fp8.cu",
             ],
             extra_compile_args={
