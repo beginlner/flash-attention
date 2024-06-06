@@ -18,12 +18,13 @@
 
 using namespace cute;
 
-template <typename PrecType, int DIM> constexpr auto getSmemLayoutK() {
+template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayoutK() {
     constexpr int headSizeBytes = sizeof(PrecType) * DIM;
+    constexpr int headSizeBytes2 = sizeof(PrecType) * DIM2;
 
-    if constexpr (headSizeBytes % 128 == 0) {
+    if constexpr (headSizeBytes % 128 == 0 && headSizeBytes2 % 128 == 0) {
         return GMMA::Layout_K_SW128_Atom<PrecType>{};
-    } else if constexpr (headSizeBytes % 64 == 0) {
+    } else if constexpr (headSizeBytes % 64 == 0 && headSizeBytes2 % 64 == 0) {
         return GMMA::Layout_K_SW64_Atom<PrecType>{};
     } else {
         return GMMA::Layout_K_SW32_Atom<PrecType>{};
@@ -100,11 +101,11 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
             Shape<Int<kBlockM>, Int<kHeadDim>>{}));
 
     using SmemLayoutK = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kHeadDim>(),
+            getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
             Shape<Int<kBlockN>, Int<kHeadDim>>{}));
 
     using SmemLayoutV = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kHeadDim>(),
+            getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
             Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutVt = decltype(tile_to_shape(
