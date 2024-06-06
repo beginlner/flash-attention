@@ -227,6 +227,9 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
         } else if (params.d == 192) {
             TORCH_CHECK(params.num_splits <= 1 && !force_split_kernel);
             run_mha_fwd_<cutlass::float_e4m3_t, 192>(params, stream);
+        } else if (params.d == 128) {
+            TORCH_CHECK(params.num_splits <= 1 && !force_split_kernel);
+            run_mha_fwd_<cutlass::float_e4m3_t, 128>(params, stream);
         } else {
             TORCH_CHECK(false, "Unsupported HeadDim");
         }
@@ -772,6 +775,8 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     if (params.is_fp8) {
         if (params.d == 192) {
             run_mha_bwd_<cutlass::float_e4m3_t, 192>(params, stream);
+        } else if (params.d == 128) {
+            run_mha_bwd_<cutlass::float_e4m3_t, 128>(params, stream);
         } else {
             TORCH_CHECK(false, "Unsupported HeadDim");
         }
