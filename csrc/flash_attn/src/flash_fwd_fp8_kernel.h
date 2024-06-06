@@ -232,8 +232,6 @@ inline __device__ void compute_attn_1rowblock_fp8(const Params &params, const in
                                        binfo.actual_seqlen_q - m_block * kBlockM);
 
     // // if (cute::thread(1, 0)) { print(tQsQ); }
-    // // Tensor sQNoSwizzle = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)), typename Kernel_traits::SmemLayoutQNoSwizzle{});
-    // // if (cute::thread0()) { print(sQNoSwizzle); }
 
     int n_block = n_block_max - 1;
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.

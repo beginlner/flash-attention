@@ -121,7 +121,6 @@ struct Flash_fwd_kernel_traits : public Base {
     // https://github.com/ColfaxResearch/cutlass-kernels/blob/a222587e6d59b93ba704853d3946fb686d8b8892/src/fmha/fmha_forward.cu#L434
     using SmemLayoutVtransposed = decltype(
         composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
-    using SmemLayoutVtransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutVtransposed{}));
 
     using SmemLayoutAtomO = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
@@ -130,7 +129,7 @@ struct Flash_fwd_kernel_traits : public Base {
     using SmemLayoutO = decltype(tile_to_shape(
         SmemLayoutAtomO{},
         Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
-    using SmemCopyAtomO = Copy_Atom<DefaultCopy, Element>;
+    using SmemCopyAtomO = Copy_Atom<SM90_U32x4_STSM_N, Element>;
     using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;
 
     static constexpr int kSmemQSize = size(SmemLayoutQ{}) * sizeof(Element);
@@ -320,7 +319,6 @@ struct Flash_bwd_kernel_traits : public Base {
 
     using SmemLayoutKtransposed = decltype(
         composition(SmemLayoutK{}, make_layout(Shape<Int<kHeadDim>, Int<kBlockN>>{}, GenRowMajor{})));
-    using SmemLayoutKtransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutKtransposed{}));
 
     // TODO: generalize to other values of kBlockN
     // TODO: what should be the Swizzle here? 3 is faster than 1, and 1 is faster than 2
@@ -342,17 +340,14 @@ struct Flash_bwd_kernel_traits : public Base {
         make_shape(Int<kBlockM>{}, Int<kBlockN>{})));
     using SmemLayoutPdStransposed = decltype(
         composition(SmemLayoutPdS{}, make_layout(Shape<Int<kBlockN>, Int<kBlockM>>{}, GenRowMajor{})));
-    using SmemLayoutPdStransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutPdStransposed{}));
 
-    using SmemCopyAtomPdS = Copy_Atom<DefaultCopy, elem_type>;
+    using SmemCopyAtomPdS = Copy_Atom<SM90_U32x4_STSM_N, elem_type>;
 
     using SmemLayoutQtransposed = decltype(
         composition(SmemLayoutQ{}, make_layout(Shape<Int<kHeadDim>, Int<kBlockM>>{}, GenRowMajor{})));
-    using SmemLayoutQtransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutQtransposed{}));
 
     using SmemLayoutdOtransposed = decltype(
         composition(SmemLayoutdO{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockM>>{}, GenRowMajor{})));
-    using SmemLayoutdOtransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutdOtransposed{}));
 
     using SmemLayoutAtomdKV = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
@@ -366,7 +361,7 @@ struct Flash_bwd_kernel_traits : public Base {
         GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockN>{}, Int<kHeadDimV>{})));
 
-    using SmemCopyAtomdKV = Copy_Atom<DefaultCopy, elem_type>;
+    using SmemCopyAtomdKV = Copy_Atom<SM90_U32x4_STSM_N, elem_type>;
 
     using SmemLayoutAtomdQ = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
@@ -375,7 +370,7 @@ struct Flash_bwd_kernel_traits : public Base {
     using SmemLayoutdQ = decltype(tile_to_shape(
         GMMA::Layout_K_SW64_Atom<Element>{},
         make_shape(Int<kBlockM>{}, Int<kHeadDim>{})));
-    using SmemCopyAtomdQ = Copy_Atom<DefaultCopy, elem_type>;
+    using SmemCopyAtomdQ = Copy_Atom<SM90_U32x4_STSM_N, elem_type>;
 
     // Double buffer for sQ
     static constexpr int kSmemQdOSize = (size(SmemLayoutQ{}) * (No_double_buffer ? 1 : 2) + size(SmemLayoutdO{})) * sizeof(Element);

@@ -153,29 +153,18 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     Tensor gdPsum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dsoftmax_sum) + row_offset_dpsum),
                                 Shape<Int<kBlockM>>{}, Stride<_1>{});
 
-    Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
-                            typename Kernel_traits::SmemLayoutQ{});
+    Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)), typename Kernel_traits::SmemLayoutQ{});
     Tensor sQt = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutQtransposed{});
-    Tensor sQtNoSwizzle = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutQtransposedNoSwizzle{});
     // Double buffer for sQ
-    Tensor sQ2 = make_tensor(sQ.data() + size(sQ),
-                            typename Kernel_traits::SmemLayoutQ{});
-    Tensor sQt2 = make_tensor(sQ2.data(), typename Kernel_traits::SmemLayoutQtransposed{});
-    Tensor sQtNoSwizzle2 = make_tensor(sQ2.data(), typename Kernel_traits::SmemLayoutQtransposedNoSwizzle{});
     Tensor sdO = make_tensor(sQ.data() + (Double_buffer ? 2 : 1) * size(sQ), typename Kernel_traits::SmemLayoutdO{});
     Tensor sdOt = make_tensor(sdO.data(), typename Kernel_traits::SmemLayoutdOtransposed{});
-    Tensor sdOtransposedNoSwizzle = make_tensor(sdO.data(),
-                                                typename Kernel_traits::SmemLayoutdOtransposedNoSwizzle{});
     Tensor sK = make_tensor(sdO.data() + size(sdO), typename Kernel_traits::SmemLayoutK{});
     Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutV{});
     Tensor sKt = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutKtransposed{});
-    Tensor sKtNoSwizzle = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutKtransposedNoSwizzle{});
     Tensor sdS = make_tensor(sV.data() + size(sV), typename Kernel_traits::SmemLayoutPdS{});
     Tensor sdSt = make_tensor(sdS.data(), typename Kernel_traits::SmemLayoutPdStransposed{});
-    Tensor sdStNoSwizzle = make_tensor(sdS.data(), typename Kernel_traits::SmemLayoutPdStransposedNoSwizzle{});
     Tensor sP = make_tensor(sdS.data() + size(sdS), typename Kernel_traits::SmemLayoutPdS{});
     Tensor sPt = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutPdStransposed{});
-    Tensor sPtNoSwizzle = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutPdStransposedNoSwizzle{});
     // sP and sdQ share the same memory so be careful
     Tensor sdQ = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutdQ{});
 
@@ -222,7 +211,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     typename Kernel_traits::TiledGMmaS tiled_gmma_s;
     auto thr_gmma_s = tiled_gmma_s.get_thread_slice(tidx);
     Tensor tSrQ = thr_gmma_s.partition_fragment_A(sQ);
-    Tensor tSrQ2 = thr_gmma_s.partition_fragment_A(sQ2);
     Tensor tSrK = thr_gmma_s.partition_fragment_B(sK);
 
     typename Kernel_traits::TiledGMmadP tiled_gmma_dp;
@@ -232,19 +220,18 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 
     typename Kernel_traits::TiledGMmadK tiled_gmma_dk;
     auto thr_gmma_dk = tiled_gmma_dk.get_thread_slice(tidx);
-    Tensor tdKrdSt = thr_gmma_dk.partition_fragment_A(sdStNoSwizzle);
-    Tensor tdKrQt = thr_gmma_dk.partition_fragment_B(sQtNoSwizzle);
-    Tensor tdKrQt2 = thr_gmma_dk.partition_fragment_B(sQtNoSwizzle2);
+    Tensor tdKrdSt = thr_gmma_dk.partition_fragment_A(sdSt);
+    Tensor tdKrQt = thr_gmma_dk.partition_fragment_B(sQt);
 
     typename Kernel_traits::TiledGMmadV tiled_gmma_dv;
     auto thr_gmma_dv = tiled_gmma_dv.get_thread_slice(tidx);
-    Tensor tdVrPt = thr_gmma_dv.partition_fragment_A(sPtNoSwizzle);
-    Tensor tdVrdOt = thr_gmma_dv.partition_fragment_B(sdOtransposedNoSwizzle);
+    Tensor tdVrPt = thr_gmma_dv.partition_fragment_A(sPt);
+    Tensor tdVrdOt = thr_gmma_dv.partition_fragment_B(sdOt);
 
     typename Kernel_traits::TiledGMmadQ tiled_gmma_dq;
     auto thr_gmma_dq = tiled_gmma_dq.get_thread_slice(tidx);
     Tensor tdQrdS = thr_gmma_dq.partition_fragment_A(sdS);
-    Tensor tdQrKt = thr_gmma_dq.partition_fragment_B(sKtNoSwizzle);
+    Tensor tdQrKt = thr_gmma_dq.partition_fragment_B(sKt);
 
     Tensor tdKrdK_gmma = partition_fragment_C(tiled_gmma_dk, Shape<Int<kBlockN>, Int<kHeadDim>>{});
     Tensor acc_dk = make_tensor(tdKrdK_gmma.data(), flash::convert_gmma_to_mma_tensor(tdKrdK_gmma.layout()));  // MMA, MMA_N, MMA_K
@@ -362,9 +349,13 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         return;
     }
 
-    if (Double_buffer && m_block % 2 == 1) {  // Double buffer for sQ
-        tQsQ.data() = tQsQ.data() + size(sQ);
-        tSsQ.data() = tSsQ.data() + size(sQ);
+    if (Double_buffer && m_block % 2 == 1) {
+        // Double buffer for sQ
+        const int sQ_offset = size(sQ);
+        tQsQ.data() = tQsQ.data() + sQ_offset;
+        tSsQ.data() = tSsQ.data() + sQ_offset;
+        tSrQ.data() = tSrQ.data() + sQ_offset / 8;
+        tdKrQt.data() = tdKrQt.data() + sQ_offset / 8;
     }
 
     if ((!Is_first && !Seq_parallel) || params.deterministic) { __syncthreads(); }
@@ -451,7 +442,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         //     cute::copy(smem_tiled_copy_KV, tSsK(_, _, k), tSrK_copy_view(_, _, k));
         // }
         // if (cute::thread0()) { print(tSrK); }
-        flash::gemm(tiled_gmma_s, (!Double_buffer || m_block % 2 == 0) ? tSrQ : tSrQ2, tSrK, tSrS_gmma);
+        flash::gemm(tiled_gmma_s, tSrQ, tSrK, tSrS_gmma);
 
         // Reshape acc_s from (MMA=4, MMA_N, MMA_N) to (col=(2, MMA_N), row=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
@@ -649,7 +640,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             cute::copy(smem_tiled_copy_dQ, taccdQrdQ, taccdQsdQ);
         }
 
-        flash::gemm(tiled_gmma_dk, tdKrdSt, (!Double_buffer || m_block % 2 == 0) ? tdKrQt : tdKrQt2, tdKrdK_gmma);
+        flash::gemm(tiled_gmma_dk, tdKrdSt, tdKrQt, tdKrdK_gmma);
         // if (cute::thread0()) { print(acc_dk); }
         if (!Double_buffer && m_block > m_block_min) {
             __syncthreads();
@@ -680,6 +671,12 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             }
         }
 
+        if (Double_buffer) {
+            // Double buffer for sQ
+            const int sQ_offset = m_block % 2 == 0 ? size(sQ) : -size(sQ);
+            tSrQ.data() = tSrQ.data() + sQ_offset / 8;
+            tdKrQt.data() = tdKrQt.data() + sQ_offset / 8;
+        }
     }
 
     // Epilogue
