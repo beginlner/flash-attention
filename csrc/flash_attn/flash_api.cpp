@@ -233,6 +233,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
         } else {
             TORCH_CHECK(false, "Unsupported HeadDim");
         }
+        return;
     }
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
@@ -780,6 +781,7 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         } else {
             TORCH_CHECK(false, "Unsupported HeadDim");
         }
+        return;
     }
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
