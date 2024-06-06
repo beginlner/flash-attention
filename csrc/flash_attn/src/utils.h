@@ -446,7 +446,7 @@ __forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tenso
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-__forceinline__ __device__ auto convert_type_out(Tensor<Engine0, Layout0> const &tensor0, Tensor<Engine1, Layout1> &tensor1) {
+__forceinline__ __device__ auto convert_type_out(Tensor<Engine0, Layout0> const &tensor0, Tensor<Engine1, Layout1> const &tensor1) {
     using From_type = typename Engine0::value_type;
     using To_type = typename Engine1::value_type;
     constexpr int numel = decltype(size(tensor0))::value;
