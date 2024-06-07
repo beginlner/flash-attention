@@ -21,7 +21,7 @@ using namespace cute;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int THREADS_PER_ROW, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Engine2, typename Layout2>
-inline __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engine2, Layout2> const &o,
+__forceinline__ __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engine2, Layout2> const &o,
                                 Tensor<Engine1, Layout1> &dP_sum, const int gdP_col_stride, const float scale) {
     static_assert(Layout0::rank == 3, "Only support 3D Tensor");
     static_assert(Layout2::rank == 3, "Only support 3D Tensor");
@@ -55,7 +55,7 @@ inline __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engi
 // Just compute dot(do, o) and write the result (softmax_d) to global memory as a separate kernel.
 // This is used in the case where we want to parallelize the backward across seqlen_k.
 template<bool Clear_dQaccum=true, typename Kernel_traits, typename Params>
-inline __device__ void compute_dot_do_o(const Params &params) {
+__forceinline__ __device__ void compute_dot_do_o(const Params &params) {
     using GradElement = typename Kernel_traits::GradElement;
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
@@ -145,7 +145,7 @@ inline __device__ void compute_dot_do_o(const Params &params) {
 // Convert dQ from dQaccum (in float) to fp16/bf16.
 // This is used in the case where we want to parallelize the backward across seqlen_k.
 template<typename Kernel_traits, typename Params>
-inline __device__ void convert_dQ(const Params &params, const int nsplits) {
+__forceinline__ __device__ void convert_dQ(const Params &params, const int nsplits) {
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
