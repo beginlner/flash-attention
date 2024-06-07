@@ -25,7 +25,7 @@ using namespace cute;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<class... Args, class TiledGMMA>
-inline __device__ auto custom_tiled_copy(Copy_Atom<Args...> const& copy_atom, TiledGMMA const& tiled_gmma) {
+__forceinline__ __device__ auto custom_tiled_copy(Copy_Atom<Args...> const& copy_atom, TiledGMMA const& tiled_gmma) {
     auto tv_layout = tiled_gmma.get_layoutC_TV();
     if constexpr (rank<0>(tv_layout) == _4{}) {
         auto new_tv_stride = make_stride(make_stride(stride<0, 0>(tv_layout), _2{}, stride<0, 2>(tv_layout), stride<0, 3>(tv_layout)),
@@ -44,7 +44,7 @@ inline __device__ auto custom_tiled_copy(Copy_Atom<Args...> const& copy_atom, Ti
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_first, bool Is_last, bool Seq_parallel=false, typename Params>
-inline __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, const int bidb, const int bidh, const int n_block) {
+__forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &params, const int bidb, const int bidh, const int n_block) {
     static_assert(!Is_dropout);
     static_assert(!Is_first);
     static_assert(!Is_last);

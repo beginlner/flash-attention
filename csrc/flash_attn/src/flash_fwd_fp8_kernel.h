@@ -25,7 +25,7 @@ using namespace cute;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, typename Params>
-inline __device__ void compute_attn_1rowblock_fp8(const Params &params, const int bidb, const int bidh, const int m_block) {
+__forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params, const int bidb, const int bidh, const int m_block) {
 
     using Element = typename Kernel_traits::Element;
     using OutElement = typename Kernel_traits::OutElement;
@@ -465,7 +465,7 @@ inline __device__ void compute_attn_1rowblock_fp8(const Params &params, const in
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV, typename Params>
-inline __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int num_n_splits) {
+__forceinline__ __device__ void compute_attn_1rowblock_splitkv_fp8(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int num_n_splits) {
     static_assert(!Append_KV);
 
     using Element = typename Kernel_traits::Element;

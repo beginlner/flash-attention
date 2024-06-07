@@ -78,7 +78,7 @@ make_tiled_copy_C_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_first, bool Is_last, bool Seq_parallel=false, typename Params>
-inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const int bidb, const int bidh, const int n_block) {
+__forceinline__ __device__ void compute_dq_dk_dv_1colblock(const Params &params, const int bidb, const int bidh, const int n_block) {
 
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
@@ -755,7 +755,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Has_alibi, bool Is_even_M, bool Is_even_K, typename Params>
-inline __device__ void compute_dq_dk_dv(const Params &params) {
+__forceinline__ __device__ void compute_dq_dk_dv(const Params &params) {
 
     // The block index for the batch.
     const int bidb = blockIdx.x;
@@ -782,7 +782,7 @@ inline __device__ void compute_dq_dk_dv(const Params &params) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, typename Params>
-inline __device__ void compute_dq_dk_dv_seqk_parallel(const Params &params) {
+__forceinline__ __device__ void compute_dq_dk_dv_seqk_parallel(const Params &params) {
 
     // The block index for the batch.
     const int bidb = blockIdx.y;
