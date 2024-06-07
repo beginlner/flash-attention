@@ -99,6 +99,15 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
+template<typename T>
+void wait_stream(const T &stream0, const T &stream1) {
+    cudaEvent_t event;
+    C10_CUDA_CHECK(cudaEventCreate(&event));
+    C10_CUDA_CHECK(cudaEventRecord(event, stream1));
+    C10_CUDA_CHECK(cudaStreamWaitEvent(stream0, event, 0));
+    C10_CUDA_CHECK(cudaEventDestroy(event));
+}
+
 template<typename Kernel_traits>
 void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(!Kernel_traits::Is_Q_in_regs, "SplitKV implementation does not support Is_Q_in_regs");
