@@ -110,6 +110,17 @@
     }                                        \
   }()
 
+#define FP8_SWITCH(COND, ...) \
+  [&] {                       \
+    if (COND) {               \
+      using elem_type = cutlass::float_e4m3_t; \
+      return __VA_ARGS__();   \
+    } else {                  \
+      using elem_type = cutlass::float_e5m2_t; \
+      return __VA_ARGS__();   \
+    }                         \
+  }()
+
 #define HEADDIM_SWITCH(HEADDIM, ...)   \
   [&] {                                    \
     if (HEADDIM <= 32) {                   \

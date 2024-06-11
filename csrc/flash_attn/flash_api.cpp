@@ -189,6 +189,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                      window_size_left,
                      window_size_right);
 
+    params.fp8_type = dout.dtype() == torch::kFloat8_e4m3fn ? 1 : dout.dtype() == torch::kFloat8_e5m2 ? 2 : 0;
+
     // Set the pointers and strides.
     params.do_ptr = dout.data_ptr();
     params.do_row_stride = dout.stride(-3);
@@ -790,13 +792,15 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     if (params.is_fp8) {
-        if (params.d == 192) {
-            run_mha_bwd_<cutlass::float_e4m3_t, 192>(params, stream);
-        } else if (params.d == 128) {
-            run_mha_bwd_<cutlass::float_e4m3_t, 128>(params, stream);
-        } else {
-            TORCH_CHECK(false, "Unsupported HeadDim");
-        }
+        FP8_SWITCH(params.fp8_type == 1, [&] {
+            if (params.d == 192) {
+                run_mha_bwd_fp8_<cutlass::float_e4m3_t, elem_type, 192>(params, stream);
+            } else if (params.d == 128) {
+                run_mha_bwd_fp8_<cutlass::float_e4m3_t, elem_type, 128>(params, stream);
+            } else {
+                TORCH_CHECK(false, "Unsupported HeadDim");
+            }
+        });
         return;
     }
     FP16_SWITCH(!params.is_bf16, [&] {
@@ -1088,7 +1092,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
     TORCH_CHECK(k.dtype() == q_dtype, "query and key must have the same dtype");
     TORCH_CHECK(v.dtype() == q_dtype, "query and value must have the same dtype");
 //    TORCH_CHECK(out.dtype() == q_dtype, "query and out must have the same dtype");
-    TORCH_CHECK(dout.dtype() == q_dtype || (q_dtype == torch::kFloat8_e4m3fn && dout.dtype() == torch::kFloat8_e5m2), "query and dout must have the same dtype");
+    TORCH_CHECK(dout.dtype() == q_dtype || q_dtype == torch::kFloat8_e4m3fn, "query and dout must have the same dtype");
     TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype int32");
     TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype int32");
 

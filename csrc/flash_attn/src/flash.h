@@ -134,6 +134,7 @@ struct Flash_fwd_params : public Qkv_params {
 
     bool is_bf16;
     bool is_fp8;
+    int fp8_type;
     bool is_causal;
 
     // If is_seqlens_k_cumulative, then seqlen_k is cu_seqlens_k[bidb + 1] - cu_seqlens_k[bidb].
@@ -201,3 +202,4 @@ template<typename T, int Headdim> void run_mha_fwd_splitkv_dispatch(Flash_fwd_pa
 template<typename T, int Headdim> void run_mha_fwd_fp8_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
 
 template<typename T, int Headdim> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
+template<typename T, typename TGrad, int Headdim> void run_mha_bwd_fp8_(Flash_bwd_params &params, cudaStream_t stream);
