@@ -81,18 +81,19 @@ def _flash_attn_varlen_forward(
     alibi_slopes,
     return_softmax,
     block_table=None,
-    use_fp8=False,
+    descale_q=None,
+    descale_k=None,
+    descale_v=None,
 ):
-    if use_fp8:
-        q = q.to(torch.float8_e4m3fn)
-        k = k.to(torch.float8_e4m3fn)
-        v = v.to(torch.float8_e4m3fn)
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.varlen_fwd(
         q,
         k,
         v,
+        descale_q,
+        descale_k,
+        descale_v,
         None,
         cu_seqlens_q,
         cu_seqlens_k,
@@ -180,10 +181,11 @@ def _flash_attn_varlen_backward(
     alibi_slopes,
     deterministic,
     rng_state=None,
-    use_fp8=False,
+    descale_dout=None,
+    descale_q=None,
+    descale_k=None,
+    descale_v=None,
 ):
-    if use_fp8:
-        dout = dout.to(torch.float8_e5m2)
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -192,6 +194,10 @@ def _flash_attn_varlen_backward(
         q,
         k,
         v,
+        descale_dout,
+        descale_q,
+        descale_k,
+        descale_v,
         out,
         softmax_lse,
         dq,
@@ -590,6 +596,15 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
         ctx.qk_dim = q.shape[-1]
         ctx.v_dim = v.shape[-1]
+        if use_fp8:
+            import hfai_fp8
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q, "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k, "e4m3")
+            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v, "e4m3")
+        else:
+            descale_q = None
+            descale_k = None
+            descale_v = None
         out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
             q,
             k,
@@ -605,10 +620,12 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             block_table=block_table,
-            use_fp8=use_fp8,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
         ctx.save_for_backward(
-            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+            q, k, v, descale_q, descale_k, descale_v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
@@ -623,9 +640,14 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
+        q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
         dtype = torch.bfloat16 if ctx.use_fp8 else q.dtype
         dq, dk, dv = torch.empty_like(q, dtype=dtype), torch.empty_like(k, dtype=dtype), torch.empty_like(v, dtype=dtype)
+        if ctx.use_fp8:
+            import hfai_fp8
+            dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, "e5m2")
+        else:
+            descale_dout = None
         _flash_attn_varlen_backward(
             dout,
             q,
@@ -647,7 +669,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
-            use_fp8=ctx.use_fp8,
+            descale_dout=descale_dout,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
         dq = dq[..., : ctx.qk_dim]  # We could have padded the head dimension
         dk = dk[..., : ctx.qk_dim]
