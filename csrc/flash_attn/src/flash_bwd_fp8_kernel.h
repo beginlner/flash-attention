@@ -221,6 +221,17 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &par
     Tensor tcKrKt = make_tensor(tcKrK.data(), make_layout(layout<0>(tcKrK), layout<2>(tcKrK), layout<1>(tcKrK)));
     Tensor tcdOrdOt = make_tensor(tcdOrdO.data(), make_layout(layout<0>(tcdOrdO), layout<2>(tcdOrdO), layout<1>(tcdOrdO)));
 
+    // FP8 scales
+    float Descale_DO = reinterpret_cast<float *>(params.descale_do_ptr)[0];
+    float Descale_Q = reinterpret_cast<float *>(params.descale_q_ptr)[0];
+    float Descale_K = reinterpret_cast<float *>(params.descale_k_ptr)[0];
+    float Descale_V = reinterpret_cast<float *>(params.descale_v_ptr)[0];
+    float scale_softmax = params.scale_softmax * (Descale_Q * Descale_K);
+    float scale_softmax_log2 = params.scale_softmax_log2 * (Descale_Q * Descale_K);
+    float Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
+    float Descale_S = 1.0f / Scale_S;
+    float Descale_DO_V = Descale_DO * Descale_V;
+    float Descale_DO_S = Descale_DO * Descale_S;
 
     //
     // PREDICATES
@@ -351,7 +362,7 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &par
     clear(acc_dv);
     clear(acc_dk);
 
-    const float alibi_slope = !Has_alibi || params.alibi_slopes_ptr == nullptr ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
+    const float alibi_slope = !Has_alibi || params.alibi_slopes_ptr == nullptr ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / scale_softmax;
     flash::Alibi<Is_causal> alibi(alibi_slope, binfo.actual_seqlen_k, binfo.actual_seqlen_q);
 
     for (; m_block >= m_block_min; --m_block) {
@@ -426,9 +437,10 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &par
         }
 
         // Compute the exponential value.
-        flash::scale_apply_exp2</*scale_max=*/false>(scores, lse, params.scale_softmax_log2);
+        Tensor scores_scaled = flash::scale_apply_exp2</*scale_max=*/false, /*inplace_Scale_S*/false>(scores, lse, scale_softmax_log2, Scale_S);
         // Convert scores from fp32 to fp8
-        Tensor tSrS_gmma_fp8 = flash::convert_type<Element>(tSrS_gmma);
+        Tensor tSrS_gmma_scaled = make_tensor(scores_scaled.data(), tSrS_gmma.layout());
+        Tensor tSrS_gmma_fp8 = flash::convert_type<Element>(tSrS_gmma_scaled);
         reg2reg(tSrS_gmma_fp8);
         Tensor tPrP = smem_thr_copy_PdS.retile_S(tSrS_gmma_fp8);
         cute::copy(smem_tiled_copy_PdS, tPrP, tPsPt_t);
@@ -445,14 +457,11 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &par
 
         // Reshape acc_dp from (MMA=4, MMA_N, MMA_N) to (col=(2, MMA_N), row=(2, MMA_N))
         Tensor dS = make_tensor(acc_dp.data(), flash::convert_layout_acc_rowcol(acc_dp.layout()));
-        auto pointwise_mult = [](float p, float dp, float d) {
-            return p * (dp - d);
-        };
         #pragma unroll
         for (int mi = 0; mi < size<0>(dS); ++mi) {
             #pragma unroll
             for (int ni = 0; ni < size<1>(dS); ++ni) {
-                dS(mi, ni) = pointwise_mult(scores(mi, ni), dS(mi, ni), dP_sum(mi));
+                dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) * Descale_DO_V - dP_sum(mi));
             }
         }
 
@@ -525,7 +534,9 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &par
     // Epilogue
 
     #pragma unroll
-    for (int i = 0; i < size(acc_dk); ++i) { acc_dk(i) *= params.scale_softmax_rp_dropout; }
+    for (int i = 0; i < size(acc_dk); ++i) { acc_dk(i) *= Descale_Q * params.scale_softmax_rp_dropout; }
+    #pragma unroll
+    for (int i = 0; i < size(acc_dk); ++i) { acc_dv(i) *= Descale_DO_S; }
 
     // Convert acc_dv from fp32 to fp16
     Tensor rdK = flash::convert_type<OutElement>(acc_dk);

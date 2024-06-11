@@ -31,6 +31,9 @@ struct Qkv_params {
     void *__restrict__ q_ptr;
     void *__restrict__ k_ptr;
     void *__restrict__ v_ptr;
+    void *__restrict__ descale_q_ptr;
+    void *__restrict__ descale_k_ptr;
+    void *__restrict__ descale_v_ptr;
 
     // The stride between rows of the Q, K and V matrices.
     index_t q_batch_stride;
@@ -157,6 +160,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
     void *__restrict__ dq_ptr;
     void *__restrict__ dk_ptr;
     void *__restrict__ dv_ptr;
+    void *__restrict__ descale_do_ptr;
 
     // To accumulate dQ
     void *__restrict__ dq_accum_ptr;

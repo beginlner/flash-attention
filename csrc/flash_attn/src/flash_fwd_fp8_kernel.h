@@ -178,6 +178,12 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
 
     auto reg2reg = ReorgCFp8toAFp8();
 
+    // FP8 scales
+    float Descale_Q = reinterpret_cast<float *>(params.descale_q_ptr)[0];
+    float Descale_K = reinterpret_cast<float *>(params.descale_k_ptr)[0];
+    float Descale_V = reinterpret_cast<float *>(params.descale_v_ptr)[0];
+    float scale_softmax = params.scale_softmax * (Descale_Q * Descale_K);
+    float scale_softmax_log2 = params.scale_softmax_log2 * (Descale_Q * Descale_K);
     float Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
     // Note that Descale_S is included by softmax.rowsum, so we need to divide it in lse but not in dO.
     float Descale_S = 1.0f / Scale_S;
@@ -242,7 +248,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
 
     flash::Softmax<2 * size<1>(acc_o)> softmax;
 
-    const float alibi_slope = !Has_alibi || params.alibi_slopes_ptr == nullptr ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
+    const float alibi_slope = !Has_alibi || params.alibi_slopes_ptr == nullptr ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / scale_softmax;
     flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
 
     // For performance reason, we separate out two kinds of iterations:
@@ -300,8 +306,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
 
         // TODO: when we have key_padding_mask we'll need to Check_inf
         masking_step == 0
-            ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local>(acc_s, acc_o, params.scale_softmax_log2, Scale_S)
-            : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local>(acc_s, acc_o, params.scale_softmax_log2, Scale_S);
+            ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local>(acc_s, acc_o, scale_softmax_log2, Scale_S)
+            : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local>(acc_s, acc_o, scale_softmax_log2, Scale_S);
 
         // Convert acc_s from fp32 to fp16/bf16/fp8
         Tensor rP = flash::convert_type<Element>(acc_s);
@@ -369,7 +375,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
 
-        softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2, Scale_S);
+        softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, scale_softmax_log2, Scale_S);
 
         Tensor rP = flash::convert_type<Element>(acc_s);
         int block_row_idx = m_block * (kBlockM / 16) + tidx / 32;
@@ -397,7 +403,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
 
     // Epilogue
 
-    Tensor lse = softmax.template normalize_softmax_lse<Is_dropout>(acc_o, params.scale_softmax, params.rp_dropout, Descale_S);
+    Tensor lse = softmax.template normalize_softmax_lse<Is_dropout>(acc_o, scale_softmax, params.rp_dropout, Descale_S, Descale_V);
 
     // Convert acc_o from fp32 to fp16/bf16
     Tensor rO = flash::convert_type<OutElement>(acc_o);

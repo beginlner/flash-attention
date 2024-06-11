@@ -527,6 +527,9 @@ std::vector<at::Tensor>
 mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
                const at::Tensor &k,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &v,  // total_k x num_heads_k x head_size_v, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
+               c10::optional<at::Tensor> &descale_q_,
+               c10::optional<at::Tensor> &descale_k_,
+               c10::optional<at::Tensor> &descale_v_,
                c10::optional<at::Tensor> &out_, // total_q x num_heads x head_size_v, total_k := \sum_{i=0}^{b} s_i
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
@@ -716,6 +719,19 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      window_size_right,
                      seqlenq_ngroups_swapped);
     params.d_v = head_size_v;
+
+    at::Tensor descale_q, descale_k, descale_v;
+    if (q_dtype == torch::kFloat8_e4m3fn) {
+        TORCH_CHECK(descale_q_.has_value());
+        TORCH_CHECK(descale_k_.has_value());
+        TORCH_CHECK(descale_v_.has_value());
+        descale_q = descale_q_.value();
+        descale_k = descale_k_.value();
+        descale_v = descale_v_.value();
+        params.descale_q_ptr = descale_q.data_ptr();
+        params.descale_k_ptr = descale_k.data_ptr();
+        params.descale_v_ptr = descale_v.data_ptr();
+    }
 
     if (paged_KV) {
         params.block_table = block_table.data_ptr<int>();
@@ -1023,6 +1039,10 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
                const at::Tensor &q,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
                const at::Tensor &k,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
                const at::Tensor &v,   // total_k x num_heads_k x head_size_v, total_k := \sum_{i=0}^{b} s_i
+               c10::optional<at::Tensor> &descale_dout_,
+               c10::optional<at::Tensor> &descale_q_,
+               c10::optional<at::Tensor> &descale_k_,
+               c10::optional<at::Tensor> &descale_v_,
                const at::Tensor &out,   // total_q x num_heads x head_size_v
                const at::Tensor &softmax_lse,     // b x h x s   softmax logsumexp
                c10::optional<at::Tensor> &dq_,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
@@ -1218,6 +1238,22 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
                      deterministic);
     params.d_v = head_size_v;
     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
+
+    at::Tensor descale_dout, descale_q, descale_k, descale_v;
+    if (q_dtype == torch::kFloat8_e4m3fn) {
+        TORCH_CHECK(descale_dout_.has_value());
+        TORCH_CHECK(descale_q_.has_value());
+        TORCH_CHECK(descale_k_.has_value());
+        TORCH_CHECK(descale_v_.has_value());
+        descale_dout = descale_dout_.value();
+        descale_q = descale_q_.value();
+        descale_k = descale_k_.value();
+        descale_v = descale_v_.value();
+        params.descale_do_ptr = descale_dout.data_ptr();
+        params.descale_q_ptr = descale_q.data_ptr();
+        params.descale_k_ptr = descale_k.data_ptr();
+        params.descale_v_ptr = descale_v.data_ptr();
+    }
 
     auto launch = &run_mha_bwd;
 

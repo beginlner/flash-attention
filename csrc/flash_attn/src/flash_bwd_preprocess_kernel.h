@@ -22,7 +22,7 @@ using namespace cute;
 
 template <int THREADS_PER_ROW, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Engine2, typename Layout2>
 __forceinline__ __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engine2, Layout2> const &o,
-                                Tensor<Engine1, Layout1> &dP_sum, const int gdP_col_stride, const float scale) {
+                                Tensor<Engine1, Layout1> &dP_sum, const float Descale_DO, const int gdP_col_stride, const float scale) {
     static_assert(Layout0::rank == 3, "Only support 3D Tensor");
     static_assert(Layout2::rank == 3, "Only support 3D Tensor");
     static_assert(Layout1::rank == 1, "Only support 1D Tensor");
@@ -37,10 +37,10 @@ __forceinline__ __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Te
     Tensor o_fp32 = flash::convert_type<float>(o_reshaped);
     #pragma unroll
     for (int mi = 0; mi < size<0>(do_reshaped); ++mi) {
-        float dP_sum_cur = do_fp32(mi, 0) * o_fp32(mi, 0);
+        float dP_sum_cur = (do_fp32(mi, 0) * Descale_DO) * o_fp32(mi, 0);
         #pragma unroll
         for (int ni = 1; ni < size<1>(do_reshaped); ni++) {
-            dP_sum_cur += do_fp32(mi, ni) * o_fp32(mi, ni);
+            dP_sum_cur += (do_fp32(mi, ni) * Descale_DO) * o_fp32(mi, ni);
         }
         flash::SumOp<float> sum_op;
         dP_sum_cur = flash::Allreduce<THREADS_PER_ROW>::run(dP_sum_cur, sum_op) * scale;
@@ -112,6 +112,9 @@ __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
     Tensor cdO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDimV>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor tdOcdO = gmem_thr_copy_dO.partition_S(cdO);
 
+    // FP8 scales
+    float Descale_DO = reinterpret_cast<float *>(params.descale_do_ptr)[0];
+
     // Allocate predicate tensors for k
     Tensor tdOpdO = make_tensor<bool>(make_shape(size<2>(tdOgdO)));
     // Set predicates for k bounds
@@ -129,7 +132,7 @@ __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
     // By right we need to scale dP up by 1/p_dropout, but instead we don't and only scale the final
     // results (dQ and dK) by 1/p_dropout. So we need to keep dP_sum scaled down by p_dropout here,
     // so that (dP - dP_sum) is on the same scale.
-    dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, dP_sum,
+    dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, dP_sum, Descale_DO,
                                                 Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout);
     if (Clear_dQaccum) {
         // We're actually not zero'ing out all of dQaccum, but only the part that we're going to
@@ -179,6 +182,9 @@ __forceinline__ __device__ void convert_dQ(const Params &params, const int nspli
                                   Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                   make_stride(params.h * params.d_rounded, _1{}));
 
+    // FP8 scales
+    float Descale_K = reinterpret_cast<float *>(params.descale_k_ptr)[0];
+
     Tensor sdQ = make_tensor(make_smem_ptr(reinterpret_cast<OutElement *>(smem_)),
                              typename Kernel_traits::SmemLayoutdQ{});
 
@@ -209,7 +215,7 @@ __forceinline__ __device__ void convert_dQ(const Params &params, const int nspli
         tdQgdQaccum.data() = tdQgdQaccum.data() + params.dq_accum_split_stride;
     }
     #pragma unroll
-    for (int i = 0; i < size(acc_dq); ++i) { acc_dq(i) *= params.scale_softmax_rp_dropout; }
+    for (int i = 0; i < size(acc_dq); ++i) { acc_dq(i) *= Descale_K * params.scale_softmax_rp_dropout; }
     // Convert acc_dq from fp32 to fp16
     Tensor rdQ = flash::convert_type<OutElement>(acc_dq);
     Tensor taccdQrdQ = smem_thr_copy_dQ.retile_S(rdQ);  // ((Atom,AtomNum), MMA_N, MMA_N)
