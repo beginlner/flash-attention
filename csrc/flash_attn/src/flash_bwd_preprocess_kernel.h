@@ -22,7 +22,7 @@ using namespace cute;
 
 template <int THREADS_PER_ROW, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Engine2, typename Layout2>
 __forceinline__ __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Tensor<Engine2, Layout2> const &o,
-                                Tensor<Engine1, Layout1> &dP_sum, const float Descale_DO, const int gdP_col_stride, const float scale) {
+                                Tensor<Engine1, Layout1> &dP_sum, const int gdP_col_stride, const float scale, const float Descale_DO=1.0f) {
     static_assert(Layout0::rank == 3, "Only support 3D Tensor");
     static_assert(Layout2::rank == 3, "Only support 3D Tensor");
     static_assert(Layout1::rank == 1, "Only support 1D Tensor");
@@ -113,7 +113,8 @@ __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
     Tensor tdOcdO = gmem_thr_copy_dO.partition_S(cdO);
 
     // FP8 scales
-    float Descale_DO = reinterpret_cast<float *>(params.descale_do_ptr)[0];
+    float Descale_DO = 1.0f;
+    if constexpr (sizeof_bits_v<GradElement> == 8) Descale_DO = reinterpret_cast<float *>(params.descale_do_ptr)[0];
 
     // Allocate predicate tensors for k
     Tensor tdOpdO = make_tensor<bool>(make_shape(size<2>(tdOgdO)));
@@ -132,8 +133,8 @@ __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
     // By right we need to scale dP up by 1/p_dropout, but instead we don't and only scale the final
     // results (dQ and dK) by 1/p_dropout. So we need to keep dP_sum scaled down by p_dropout here,
     // so that (dP - dP_sum) is on the same scale.
-    dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, dP_sum, Descale_DO,
-                                                Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout);
+    dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, dP_sum,
+                                                Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout, Descale_DO);
     if (Clear_dQaccum) {
         // We're actually not zero'ing out all of dQaccum, but only the part that we're going to
         // do atomicAdds on.
@@ -149,6 +150,7 @@ __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
 // This is used in the case where we want to parallelize the backward across seqlen_k.
 template<typename Kernel_traits, typename Params>
 __forceinline__ __device__ void convert_dQ(const Params &params, const int nsplits) {
+    using GradElement = typename Kernel_traits::GradElement;
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -183,7 +185,8 @@ __forceinline__ __device__ void convert_dQ(const Params &params, const int nspli
                                   make_stride(params.h * params.d_rounded, _1{}));
 
     // FP8 scales
-    float Descale_K = reinterpret_cast<float *>(params.descale_k_ptr)[0];
+    float Descale_K = 1.0f;
+    if constexpr (sizeof_bits_v<GradElement> == 8) Descale_K = reinterpret_cast<float *>(params.descale_k_ptr)[0];
 
     Tensor sdQ = make_tensor(make_smem_ptr(reinterpret_cast<OutElement *>(smem_)),
                              typename Kernel_traits::SmemLayoutdQ{});
