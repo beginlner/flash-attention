@@ -590,13 +590,14 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         deterministic,
         return_softmax,
         block_table,
-        use_fp8,
+        fp8_type,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         ctx.qk_dim = q.shape[-1]
         ctx.v_dim = v.shape[-1]
-        if use_fp8:
+        if fp8_type is not None:
+            assert fp8_type[0] == "e4m3"
             import hfai_fp8
             q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q, "e4m3")
             k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k, "e4m3")
@@ -635,17 +636,17 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
-        ctx.use_fp8 = use_fp8
+        ctx.fp8_type = fp8_type
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
     def backward(ctx, dout, *args):
         q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
-        dtype = torch.bfloat16 if ctx.use_fp8 else q.dtype
+        dtype = torch.bfloat16 if ctx.fp8_type is not None else q.dtype
         dq, dk, dv = torch.empty_like(q, dtype=dtype), torch.empty_like(k, dtype=dtype), torch.empty_like(v, dtype=dtype)
-        if ctx.use_fp8:
+        if ctx.fp8_type is not None:
             import hfai_fp8
-            dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, "e5m2")
+            dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
         else:
             descale_dout = None
         _flash_attn_varlen_backward(
@@ -1049,7 +1050,7 @@ def flash_attn_varlen_func(
     deterministic=False,
     return_attn_probs=False,
     block_table=None,
-    use_fp8=False,
+    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3") or ("e4m3", "e5m2")
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -1121,7 +1122,7 @@ def flash_attn_varlen_func(
         deterministic,
         return_attn_probs,
         block_table,
-        use_fp8,
+        fp8_type,
     )
 
 
