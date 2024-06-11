@@ -178,10 +178,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
 
     auto reg2reg = ReorgCFp8toAFp8();
 
-    float Scale_S = 1.0f;
-    if (sizeof_bits_v<Element> == 8) {
-        Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
-    }
+    float Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
     // Note that Descale_S is included by softmax.rowsum, so we need to divide it in lse but not in dO.
     float Descale_S = 1.0f / Scale_S;
 
@@ -327,7 +324,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         // or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        if (sizeof_bits_v<Element> == 8) { reg2reg(tOrP); }
+        reg2reg(tOrP);
         // if (cute::thread0()) { print(tOrP); }
         flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO_mma);
         // if (cute::thread0()) { print(scores); }
@@ -394,7 +391,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         // or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        if (sizeof_bits_v<Element> == 8) { reg2reg(tOrP); }
+        reg2reg(tOrP);
         flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO_mma);
     }
 
@@ -632,10 +629,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_fp8(const Params 
 
     auto reg2reg = ReorgCFp8toAFp8();
 
-    float Scale_S = 1.0f;
-    if (sizeof_bits_v<Element> == 8) {
-        Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
-    }
+    float Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
     // Note that Descale_S is included by softmax.rowsum, so we need to divide it in lse but not in dO.
     float Descale_S = 1.0f / Scale_S;
 
@@ -818,7 +812,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_fp8(const Params 
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         // or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        if (sizeof_bits_v<Element> == 8) { reg2reg(tOrP); }
+        reg2reg(tOrP);
 
         flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO);
 
@@ -906,7 +900,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_fp8(const Params 
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         // or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
         Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        if (sizeof_bits_v<Element> == 8) { reg2reg(tOrP); }
+        reg2reg(tOrP);
 
         flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO);
 
