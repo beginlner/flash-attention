@@ -16,6 +16,19 @@
 
 using namespace cute;
 
+template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayoutK() {
+    constexpr int headSizeBytes = sizeof(PrecType) * DIM;
+    constexpr int headSizeBytes2 = sizeof(PrecType) * DIM2;
+
+    if constexpr (headSizeBytes % 128 == 0 && headSizeBytes2 % 128 == 0) {
+        return GMMA::Layout_K_SW128_Atom<PrecType>{};
+    } else if constexpr (headSizeBytes % 64 == 0 && headSizeBytes2 % 64 == 0) {
+        return GMMA::Layout_K_SW64_Atom<PrecType>{};
+    } else {
+        return GMMA::Layout_K_SW32_Atom<PrecType>{};
+    }
+}
+
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename elem_type=cutlass::half_t>
 struct Flash_kernel_traits {
 
@@ -39,14 +52,6 @@ struct Flash_kernel_traits {
 #else
     using MMA_Atom_Arch = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
 #endif
-
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 750
-    using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, elem_type>;
-    using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x8_LDSM_T, elem_type>;
-#else
-    using SmemCopyAtom = Copy_Atom<DefaultCopy, elem_type>;
-    using SmemCopyAtomTransposed = Copy_Atom<DefaultCopy, elem_type>;
-#endif
 };
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
@@ -63,8 +68,6 @@ struct Flash_fwd_kernel_traits : public Base {
     using ElementAccum = typename Base::ElementAccum;
     using index_t = typename Base::index_t;
     static constexpr bool Has_cp_async = Base::Has_cp_async;
-    using SmemCopyAtom = typename Base::SmemCopyAtom;
-    using SmemCopyAtomTransposed = typename Base::SmemCopyAtomTransposed;
 
     static constexpr bool Share_Q_K_smem = Share_Q_K_smem_;
     static constexpr bool Is_Q_in_regs = Is_Q_in_regs_ || Share_Q_K_smem;
@@ -99,20 +102,16 @@ struct Flash_fwd_kernel_traits : public Base {
                                    GMMA::Major::K, GMMA::Major::MN>(),
         Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
 
-    using SmemLayoutAtomQ = typename std::conditional_t<kHeadDim % 64 == 0 && kHeadDimV % 64 == 0,
-                                                        GMMA::Layout_K_SW128_Atom<Element>,
-                                                        GMMA::Layout_K_SW64_Atom<Element>>;
-
     using SmemLayoutQ = decltype(tile_to_shape(
-        SmemLayoutAtomQ{},
+        getSmemLayoutK<Element, kHeadDim>(),
         Shape<Int<kBlockM>, Int<kHeadDim>>{}));
 
     using SmemLayoutK = decltype(tile_to_shape(
-        SmemLayoutAtomQ{},
+        getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
         Shape<Int<kBlockN>, Int<kHeadDim>>{}));
 
     using SmemLayoutV = decltype(tile_to_shape(
-        SmemLayoutAtomQ{},
+        getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
         Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
@@ -222,8 +221,6 @@ struct Flash_bwd_kernel_traits : public Base {
     using ElementAccum = typename Base::ElementAccum;
     using index_t = typename Base::index_t;
     static constexpr bool Has_cp_async = Base::Has_cp_async;
-    using SmemCopyAtom = typename Base::SmemCopyAtom;
-    using SmemCopyAtomTransposed = typename Base::SmemCopyAtomTransposed;
 
     static_assert(!Is_V_in_regs_);
     static constexpr bool Is_V_in_regs = Is_V_in_regs_;

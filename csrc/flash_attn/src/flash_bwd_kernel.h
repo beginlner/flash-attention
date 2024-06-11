@@ -242,19 +242,6 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock(const Params &params,
     // Copy Atom retiling
     //
 
-    auto smem_tiled_copy_QdO = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp);
-    auto smem_thr_copy_QdO = smem_tiled_copy_QdO.get_thread_slice(tidx);
-    Tensor tSsQ = smem_thr_copy_QdO.partition_S(sQ);
-    Tensor tdPsdO = smem_thr_copy_QdO.partition_S(sdO);
-
-    // auto smem_thr_copy_KV = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp).get_thread_slice(tidx);
-    auto smem_tiled_copy_KV = make_tiled_copy_B_warpcontiguousN<MMA_N_SdP>(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp);
-    auto smem_thr_copy_KV = smem_tiled_copy_KV.get_thread_slice(tidx);
-    Tensor tSsK = smem_thr_copy_KV.partition_S(sK);
-    // if (cute::thread(0, 0) && n_block == 0) { printf("sK layout: "); print(sK.layout()); printf("\n"); }
-    // if (cute::thread(0, 0) && n_block == 0) { print(tSsK.layout()); printf("\n"); }
-    Tensor tdPsV = smem_thr_copy_KV.partition_S(sV);
-
     // Partition sP and sdS to match the accumulator partitioning
     // This has to be tiled_mma_sdp, not tiled_mma_dkv
     // auto smem_thr_copy_PdS = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomPdS{}, tiled_mma_sdp).get_thread_slice(tidx);
@@ -353,7 +340,6 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock(const Params &params,
         // Double buffer for sQ
         const int sQ_offset = size(sQ);
         tQsQ.data() = tQsQ.data() + sQ_offset;
-        tSsQ.data() = tSsQ.data() + sQ_offset;
         tSrQ.data() = tSrQ.data() + sQ_offset / 8;
         tdKrQt.data() = tdKrQt.data() + sQ_offset / 8;
     }
@@ -568,7 +554,6 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock(const Params &params,
             // Double buffer for sQ
             const int sQ_offset = m_block % 2 == 0 ? size(sQ) : -size(sQ);
             tQsQ.data() = tQsQ.data() + sQ_offset;
-            tSsQ.data() = tSsQ.data() + sQ_offset;
             // Advance gQ
             tQgQ.data() = tQgQ.data() + (-int(kBlockM * params.q_row_stride));
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ);

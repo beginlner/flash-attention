@@ -18,32 +18,6 @@
 
 using namespace cute;
 
-template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayoutK() {
-    constexpr int headSizeBytes = sizeof(PrecType) * DIM;
-    constexpr int headSizeBytes2 = sizeof(PrecType) * DIM2;
-
-    if constexpr (headSizeBytes % 128 == 0 && headSizeBytes2 % 128 == 0) {
-        return GMMA::Layout_K_SW128_Atom<PrecType>{};
-    } else if constexpr (headSizeBytes % 64 == 0 && headSizeBytes2 % 64 == 0) {
-        return GMMA::Layout_K_SW64_Atom<PrecType>{};
-    } else {
-        return GMMA::Layout_K_SW32_Atom<PrecType>{};
-    }
-}
-
-template <typename PrecType, int DIM> constexpr auto getSmemLayoutMN() {
-
-    constexpr int headSizeBytes = sizeof(PrecType) * DIM;
-
-    if constexpr (headSizeBytes % 128 == 0) {
-        return GMMA::Layout_MN_SW128_Atom<PrecType>{};
-    } else if constexpr (headSizeBytes % 64 == 0) {
-        return GMMA::Layout_MN_SW64_Atom<PrecType>{};
-    } else {
-        return GMMA::Layout_MN_SW32_Atom<PrecType>{};
-    }
-}
-
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
         typename out_type=cutlass::half_t,
