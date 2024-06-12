@@ -596,6 +596,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
     if (head_size_v != head_size_og) {
         TORCH_CHECK(head_size_og == 128 || head_size_og == 192, "head_size_qk must be 192");
+        TORCH_CHECK(!paged_KV);
     }
     const int num_heads_k = paged_KV ? k.size(2) : k.size(1);
 
