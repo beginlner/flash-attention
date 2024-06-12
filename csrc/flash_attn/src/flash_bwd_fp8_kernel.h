@@ -536,7 +536,7 @@ __forceinline__ __device__ void compute_dq_dk_dv_1colblock_fp8(const Params &par
     #pragma unroll
     for (int i = 0; i < size(acc_dk); ++i) { acc_dk(i) *= Descale_Q * params.scale_softmax_rp_dropout; }
     #pragma unroll
-    for (int i = 0; i < size(acc_dk); ++i) { acc_dv(i) *= Descale_DO_S; }
+    for (int i = 0; i < size(acc_dv); ++i) { acc_dv(i) *= Descale_DO_S; }
 
     // Convert acc_dv from fp32 to fp16
     Tensor rdK = flash::convert_type<OutElement>(acc_dk);
