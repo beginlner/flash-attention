@@ -1317,7 +1317,7 @@ def flash_attn_with_kvcache(
     return out
 
 
-def get_kvcache_block_size(head_dim):
+def get_kvcache_block_size(head_dim: int) -> int:
     # This should match the block sizes in the CUDA kernel
     if head_dim <= 64:
         return 256
@@ -1371,7 +1371,8 @@ def flash_attn_with_blocked_kvcache(
     rotary_interleaved: bool = True,
     alibi_slopes: Optional[torch.Tensor] = None,
     num_splits: int = 0,
-):
+    return_softmax_lse: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     if head_size_v is None:
@@ -1401,4 +1402,4 @@ def flash_attn_with_blocked_kvcache(
         rotary_interleaved,
         num_splits,
     )
-    return out
+    return out if not return_softmax_lse else (out, softmax_lse)
