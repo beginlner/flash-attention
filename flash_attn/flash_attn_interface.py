@@ -299,13 +299,25 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        fp8_type,
     ):
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        if fp8_type is not None:
+            assert fp8_type[0] == "e4m3"
+            import hfai_fp8
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q.contiguous(), "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k.contiguous(), "e4m3")
+            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v.contiguous(), "e4m3")
+        else:
+            descale_q = None
+            descale_k = None
+            descale_v = None
         out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
-            qkv[:, 0],
-            qkv[:, 1],
-            qkv[:, 2],
+            q,
+            k,
+            v,
             cu_seqlens,
             cu_seqlens,
             max_seqlen,
@@ -317,8 +329,11 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             block_table=None,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
-        ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
+        ctx.save_for_backward(q, k, v, descale_q, descale_k, descale_v, out_padded, softmax_lse, cu_seqlens, rng_state)
         ctx.dropout_p = dropout_p
         ctx.max_seqlen = max_seqlen
         ctx.softmax_scale = softmax_scale
@@ -326,13 +341,19 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
+        ctx.fp8_type = fp8_type
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens, rng_state = ctx.saved_tensors
+        q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens, rng_state = ctx.saved_tensors
         qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
-        dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
+        dqkv = torch.empty(qkv_shape, dtype=dout.dtype, device=q.device)
+        if ctx.fp8_type is not None:
+            import hfai_fp8
+            dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
+        else:
+            descale_dout = None
         _flash_attn_varlen_backward(
             dout,
             q,
@@ -354,9 +375,13 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
+            descale_dout=descale_dout,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnKVPackedFunc(torch.autograd.Function):
@@ -441,13 +466,25 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        fp8_type,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
+        k, v = kv[:, 0], kv[:, 1]
+        if fp8_type is not None:
+            assert fp8_type[0] == "e4m3"
+            import hfai_fp8
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q, "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k.contiguous(), "e4m3")
+            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v.contiguous(), "e4m3")
+        else:
+            descale_q = None
+            descale_k = None
+            descale_v = None
         out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
             q,
-            kv[:, 0],
-            kv[:, 1],
+            k,
+            v,
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
@@ -459,9 +496,12 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
             block_table=None,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
         ctx.save_for_backward(
-            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+            q, k, v, descale_q, descale_k, descale_v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
@@ -471,14 +511,20 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
+        ctx.fp8_type = fp8_type
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
-        dq = torch.empty_like(q)
+        q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
+        dq = torch.empty_like(q, dtype=dout.dtype)
         kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
-        dkv = torch.empty(kv_shape, dtype=k.dtype, device=k.device)
+        dkv = torch.empty(kv_shape, dtype=dout.dtype, device=k.device)
+        if ctx.fp8_type is not None:
+            import hfai_fp8
+            dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
+        else:
+            descale_dout = None
         _flash_attn_varlen_backward(
             dout,
             q,
@@ -500,10 +546,14 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.deterministic,
             rng_state=rng_state,
+            descale_dout=descale_dout,
+            descale_q=descale_q,
+            descale_k=descale_k,
+            descale_v=descale_v,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -642,8 +692,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout, *args):
         q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
-        dtype = torch.bfloat16 if ctx.fp8_type is not None else q.dtype
-        dq, dk, dv = torch.empty_like(q, dtype=dtype), torch.empty_like(k, dtype=dtype), torch.empty_like(v, dtype=dtype)
+        dq, dk, dv = torch.empty_like(q, dtype=dout.dtype), torch.empty_like(k, dtype=dout.dtype), torch.empty_like(v, dtype=dout.dtype)
         if ctx.fp8_type is not None:
             import hfai_fp8
             dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
@@ -895,6 +944,7 @@ def flash_attn_varlen_qkvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3") or ("e4m3", "e5m2")
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -943,6 +993,7 @@ def flash_attn_varlen_qkvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        fp8_type,
     )
 
 
@@ -960,6 +1011,7 @@ def flash_attn_varlen_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3") or ("e4m3", "e5m2")
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -1031,6 +1083,7 @@ def flash_attn_varlen_kvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        fp8_type,
     )
 
 
