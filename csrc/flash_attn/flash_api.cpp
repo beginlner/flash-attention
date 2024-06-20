@@ -731,6 +731,12 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         descale_q = descale_q_.value();
         descale_k = descale_k_.value();
         descale_v = descale_v_.value();
+        TORCH_CHECK(descale_q.is_contiguous());
+        TORCH_CHECK(descale_k.is_contiguous());
+        TORCH_CHECK(descale_v.is_contiguous());
+        CHECK_SHAPE(descale_q, num_heads, total_q);
+        CHECK_SHAPE(descale_k, num_heads_k, k.size(0));
+        CHECK_SHAPE(descale_v, num_heads_k, head_size_v);
         params.descale_q_ptr = descale_q.data_ptr();
         params.descale_k_ptr = descale_k.data_ptr();
         params.descale_v_ptr = descale_v.data_ptr();

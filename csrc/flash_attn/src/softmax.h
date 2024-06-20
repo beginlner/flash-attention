@@ -188,7 +188,7 @@ struct Softmax {
     };
 
     template<bool Is_dropout=false, bool Split=false, typename Tensor0>
-    __forceinline__ __device__ TensorT normalize_softmax_lse(Tensor0 &acc_o, float softmax_scale, float rp_dropout=1.0, float Descale_S=1.0f, float Descale_V=1.0f) {
+    __forceinline__ __device__ TensorT normalize_softmax_lse(Tensor0 &acc_o, float softmax_scale, float rp_dropout=1.0, float Descale_S=1.0f) {
         SumOp<float> sum_op;
         quad_allreduce_(row_sum, row_sum, sum_op);
         TensorT lse = make_fragment_like(row_sum);
@@ -200,7 +200,6 @@ struct Softmax {
             float inv_sum = (sum == 0.f || sum != sum) ? 1.f : 1.f / sum;
             lse(mi) = (sum == 0.f || sum != sum) ? (Split ? -INFINITY : INFINITY) : row_max(mi) * softmax_scale + __logf(sum * Descale_S);
             float scale = !Is_dropout ? inv_sum : inv_sum * rp_dropout;
-            scale *= Descale_V;
             #pragma unroll
             for (int ni = 0; ni < size<1>(acc_o_rowcol); ++ni) { acc_o_rowcol(mi, ni) *= scale; }
         }

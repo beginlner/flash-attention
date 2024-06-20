@@ -306,10 +306,18 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         q_origin, k_origin, v_origin = qkv[:, 0], qkv[:, 1], qkv[:, 2]
         if fp8_type is not None:
             assert fp8_type[0] == "e4m3"
+            assert fp8_type[1] == "bf16"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin.contiguous(), "e4m3")
-            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
-            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v_origin.contiguous(), "e4m3")
+            q, descale_q = hfai_fp8.per_token_cast_to_fp8(q_origin.contiguous().view(-1, q_origin.shape[-1]), "e4m3")
+            k, descale_k = hfai_fp8.per_token_cast_to_fp8(k_origin.contiguous().view(-1, k_origin.shape[-1]), "e4m3")
+            v, descale_v = hfai_fp8.per_channel_cast_to_fp8(v_origin.contiguous().view(v_origin.shape[0], -1), "e4m3")
+
+            q = q.view(*q_origin.shape)
+            k = k.view(*k_origin.shape)
+            v = v.view(*v_origin.shape)
+            descale_q = descale_q.view(*q_origin.shape[:-1]).t().contiguous()  # [h, n]
+            descale_k = descale_k.view(*k_origin.shape[:-1]).t().contiguous()  # [h, n]
+            descale_v = descale_v.view(*v_origin.shape[1:])  # [h, d]
         else:
             q, k, v = q_origin, k_origin, v_origin
             descale_q = None
@@ -476,10 +484,17 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         q_origin, k_origin, v_origin = q, kv[:, 0], kv[:, 1]
         if fp8_type is not None:
             assert fp8_type[0] == "e4m3"
+            assert fp8_type[1] == "bf16"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin, "e4m3")
-            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
-            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v_origin.contiguous(), "e4m3")
+            q, descale_q = hfai_fp8.per_token_cast_to_fp8(q_origin.contiguous().view(-1, q_origin.shape[-1]), "e4m3")
+            k, descale_k = hfai_fp8.per_token_cast_to_fp8(k_origin.contiguous().view(-1, k_origin.shape[-1]), "e4m3")
+            v, descale_v = hfai_fp8.per_channel_cast_to_fp8(v_origin.contiguous().view(v_origin.shape[0], -1), "e4m3")
+            q = q.view(*q_origin.shape)
+            k = k.view(*k_origin.shape)
+            v = v.view(*v_origin.shape)
+            descale_q = descale_q.view(*q_origin.shape[:-1]).t().contiguous()  # [h, n]
+            descale_k = descale_k.view(*k_origin.shape[:-1]).t().contiguous()  # [h, n]
+            descale_v = descale_v.view(*v_origin.shape[1:])  # [h, d]
         else:
             q, k, v = q_origin, k_origin, v_origin
             descale_q = None
@@ -655,10 +670,17 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         q_origin, k_origin, v_origin = q, k, v
         if fp8_type is not None:
             assert fp8_type[0] == "e4m3"
+            assert fp8_type[1] == "bf16"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin, "e4m3")
-            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin, "e4m3")
-            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v_origin, "e4m3")
+            q, descale_q = hfai_fp8.per_token_cast_to_fp8(q_origin.contiguous().view(-1, q_origin.shape[-1]), "e4m3")
+            k, descale_k = hfai_fp8.per_token_cast_to_fp8(k_origin.contiguous().view(-1, k_origin.shape[-1]), "e4m3")
+            v, descale_v = hfai_fp8.per_channel_cast_to_fp8(v_origin.contiguous().view(v_origin.shape[0], -1), "e4m3")
+            q = q.view(*q_origin.shape)
+            k = k.view(*k_origin.shape)
+            v = v.view(*v_origin.shape)
+            descale_q = descale_q.view(*q_origin.shape[:-1]).t().contiguous()  # [h, n]
+            descale_k = descale_k.view(*k_origin.shape[:-1]).t().contiguous()  # [h, n]
+            descale_v = descale_v.view(*v_origin.shape[1:])  # [h, d]
         else:
             q, k, v = q_origin, k_origin, v_origin
             descale_q = None
