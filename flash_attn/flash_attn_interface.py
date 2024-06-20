@@ -303,14 +303,15 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
-        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        q_origin, k_origin, v_origin = qkv[:, 0], qkv[:, 1], qkv[:, 2]
         if fp8_type is not None:
             assert fp8_type[0] == "e4m3"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q.contiguous(), "e4m3")
-            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k.contiguous(), "e4m3")
-            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v.contiguous(), "e4m3")
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin.contiguous(), "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
+            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v_origin.contiguous(), "e4m3")
         else:
+            q, k, v = q_origin, k_origin, v_origin
             descale_q = None
             descale_k = None
             descale_v = None
@@ -333,6 +334,8 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             descale_k=descale_k,
             descale_v=descale_v,
         )
+        if fp8_type is not None and fp8_type[1] == "bf16":
+            q, k, v = q_origin, k_origin, v_origin
         ctx.save_for_backward(q, k, v, descale_q, descale_k, descale_v, out_padded, softmax_lse, cu_seqlens, rng_state)
         ctx.dropout_p = dropout_p
         ctx.max_seqlen = max_seqlen
@@ -349,7 +352,7 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens, rng_state = ctx.saved_tensors
         qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
         dqkv = torch.empty(qkv_shape, dtype=dout.dtype, device=q.device)
-        if ctx.fp8_type is not None:
+        if ctx.fp8_type is not None and ctx.fp8_type[1] != "bf16":
             import hfai_fp8
             dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
         else:
@@ -470,14 +473,15 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        k, v = kv[:, 0], kv[:, 1]
+        q_origin, k_origin, v_origin = q, kv[:, 0], kv[:, 1]
         if fp8_type is not None:
             assert fp8_type[0] == "e4m3"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q, "e4m3")
-            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k.contiguous(), "e4m3")
-            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v.contiguous(), "e4m3")
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin, "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
+            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v_origin.contiguous(), "e4m3")
         else:
+            q, k, v = q_origin, k_origin, v_origin
             descale_q = None
             descale_k = None
             descale_v = None
@@ -500,6 +504,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             descale_k=descale_k,
             descale_v=descale_v,
         )
+        if fp8_type is not None and fp8_type[1] == "bf16":
+            q, k, v = q_origin, k_origin, v_origin
         ctx.save_for_backward(
             q, k, v, descale_q, descale_k, descale_v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
@@ -520,7 +526,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         dq = torch.empty_like(q, dtype=dout.dtype)
         kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
         dkv = torch.empty(kv_shape, dtype=dout.dtype, device=k.device)
-        if ctx.fp8_type is not None:
+        if ctx.fp8_type is not None and ctx.fp8_type[1] != "bf16":
             import hfai_fp8
             dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
         else:
@@ -646,13 +652,15 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
         ctx.qk_dim = q.shape[-1]
         ctx.v_dim = v.shape[-1]
+        q_origin, k_origin, v_origin = q, k, v
         if fp8_type is not None:
             assert fp8_type[0] == "e4m3"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q, "e4m3")
-            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k, "e4m3")
-            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v, "e4m3")
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin, "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin, "e4m3")
+            v, descale_v = hfai_fp8.per_tensor_cast_to_fp8(v_origin, "e4m3")
         else:
+            q, k, v = q_origin, k_origin, v_origin
             descale_q = None
             descale_k = None
             descale_v = None
@@ -675,6 +683,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             descale_k=descale_k,
             descale_v=descale_v,
         )
+        if fp8_type is not None and fp8_type[1] == "bf16":
+            q, k, v = q_origin, k_origin, v_origin
         ctx.save_for_backward(
             q, k, v, descale_q, descale_k, descale_v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
@@ -693,7 +703,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     def backward(ctx, dout, *args):
         q, k, v, descale_q, descale_k, descale_v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
         dq, dk, dv = torch.empty_like(q, dtype=dout.dtype), torch.empty_like(k, dtype=dout.dtype), torch.empty_like(v, dtype=dout.dtype)
-        if ctx.fp8_type is not None:
+        if ctx.fp8_type is not None and ctx.fp8_type[1] != "bf16":
             import hfai_fp8
             dout, descale_dout = hfai_fp8.per_tensor_cast_to_fp8(dout, ctx.fp8_type[1])
         else:
@@ -944,7 +954,7 @@ def flash_attn_varlen_qkvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
-    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3") or ("e4m3", "e5m2")
+    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3" or "e5m2" or "bf16")
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -1011,7 +1021,7 @@ def flash_attn_varlen_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
-    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3") or ("e4m3", "e5m2")
+    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3" or "e5m2" or "bf16")
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -1103,7 +1113,7 @@ def flash_attn_varlen_func(
     deterministic=False,
     return_attn_probs=False,
     block_table=None,
-    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3") or ("e4m3", "e5m2")
+    fp8_type=None,  # (fwd_type, bwd_type), ("e4m3", "e4m3" or "e5m2" or "bf16")
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
