@@ -24,10 +24,12 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_r
         int kHeadDimV_=0,
         bool Share_KV_=false,
         int kNWarpsS_=0,
+        bool training=true,
         bool Blocked_KV_=true,
         typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_fwd_fp8_kernel_traits : public Base {
     using Element = elem_type;
+    using VElement = std::conditional_t<training, out_type, elem_type>;
     using OutElement = out_type;
     static_assert(sizeof_bits_v<Element> == 8);
     static_assert(sizeof_bits_v<OutElement> == 16);
@@ -66,8 +68,8 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
 
     static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
     using TiledMmaO = decltype(make_tiled_mma(
-            cute::GMMA::rs_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
-                    GMMA::Major::K, GMMA::Major::K>(),
+            cute::GMMA::rs_op_selector<VElement, VElement, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
+                    GMMA::Major::K, sizeof_bits_v<VElement> == 8 ? GMMA::Major::K : GMMA::Major::MN>(),
             Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
 
     using SmemLayoutQ = decltype(tile_to_shape(
@@ -79,12 +81,14 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
             Shape<Int<kBlockN>, Int<kHeadDim>>{}));
 
     using SmemLayoutV = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
+            getSmemLayoutK<VElement, kHeadDim, kHeadDimV>(),
             Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutVt = decltype(tile_to_shape(
             getSmemLayoutK<Element, kBlockN>(),
             Shape<Int<kHeadDimV>, Int<kBlockN>>{}));
+    using SmemLayoutVtTrain = decltype(
+    composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
 
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
     using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<Int<kNThreadsS>, _1>>;
@@ -102,16 +106,16 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
     static_assert(kBlockN % 64 == 0);
     static_assert(kHeadDimV % (4 * kNWarps) == 0);
     using SmemTiledCopyV = decltype(make_tiled_copy(
-            Copy_Atom<SM75_U16x4_LDSM_T, Element>{},
+            Copy_Atom<SM75_U16x4_LDSM_T, VElement>{},
             Layout<Shape<Shape<_4, _4>, Shape<_8, Int<kNWarps / 4>>>, Stride<Stride<_1, _32>, Stride<_4, _128>>>{},
             Layout<Shape<_4, _2>, Stride<_2, _1>>{}));
     using SmemTiledCopyVt = decltype(make_tiled_copy(
-            Copy_Atom<SM90_U32x2_STSM_N, Element>{},
+            Copy_Atom<SM90_U32x2_STSM_N, VElement>{},
             Layout<Shape<Shape<_8, Int<kNWarps / 4>>, Shape<_4, _4>>, Stride<Stride<_4, _128>, Stride<_1, _32>>>{},
             Layout<Shape<_2, _4>, Stride<_4, _1>>{}));
 
     static constexpr int kSmemQSize = size(SmemLayoutQ{}) * sizeof(Element);
-    static constexpr int kSmemKVSize = (Share_KV ? size(SmemLayoutK{}) * 2 : size(SmemLayoutK{}) + size(SmemLayoutV{})) * sizeof(Element);
+    static constexpr int kSmemKVSize = (Share_KV ? size(SmemLayoutK{}) * 2 * sizeof(Element): size(SmemLayoutK{}) * sizeof(Element) + size(SmemLayoutV{}) * sizeof(VElement));
     static constexpr int kSmemPSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutP{}) * sizeof(Element);
     static constexpr int kSmemRowSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutRow{}) * 3 * sizeof(float);
     static constexpr int kSmemOSize = size(SmemLayoutO{}) * sizeof(OutElement);
@@ -140,6 +144,14 @@ struct Flash_fwd_fp8_kernel_traits : public Base {
     make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
                     GmemLayoutAtom{},
                     Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{}));  // Val layout, 8 vals per read
+    static constexpr int kGmemElemsPerLoadV = sizeof(cute::uint128_t) / sizeof(VElement);
+    static constexpr int kGmemThreadsPerRowV = kBlockKSmem / kGmemElemsPerLoadV;
+    using GmemLayoutAtomV = Layout<Shape <Int<kNThreads / kGmemThreadsPerRowV>, Int<kGmemThreadsPerRowV>>,
+            Stride<Int<kGmemThreadsPerRowV>, _1>>;
+    using GmemTiledCopyV = decltype(
+    make_tiled_copy(Copy_Atom<Gmem_copy_struct, VElement>{},
+                    GmemLayoutAtomV{},
+                    Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{}));
 
     static constexpr int kGmemElemsPerLoadO = sizeof(cute::uint128_t) / sizeof(OutElement);
     static_assert(kHeadDimV % kGmemElemsPerLoadO == 0, "kHeadDim must be a multiple of kGmemElemsPerLoadO");

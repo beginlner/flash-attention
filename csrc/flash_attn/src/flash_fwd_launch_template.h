@@ -420,7 +420,7 @@ void run_mha_fwd_fp8_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t str
     TORCH_CHECK(Headdim == 576);
     TORCH_CHECK(params.d_v == 512);
     TORCH_CHECK(params.kvcache_quantization_type == 0);
-    run_flash_splitkv_fwd<Flash_fwd_fp8_kernel_traits<576, 64, 64, 8, false, false, T, cutlass::bfloat16_t, 512, true, 4>>(params, stream);
+    run_flash_splitkv_fwd<Flash_fwd_fp8_kernel_traits<576, 64, 64, 8, false, false, T, cutlass::bfloat16_t, 512, true, 4, false>>(params, stream);
 }
 
 template<typename T>

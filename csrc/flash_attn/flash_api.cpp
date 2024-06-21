@@ -564,7 +564,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         TORCH_CHECK(is_sm90 || is_sm8x, "bfloat16 is only supported on Ampere GPUs or newer");
     }
     TORCH_CHECK(k.dtype() == q_dtype, "query and key must have the same dtype");
-    TORCH_CHECK(v.dtype() == q_dtype, "query and value must have the same dtype");
+//    TORCH_CHECK(v.dtype() == q_dtype, "query and value must have the same dtype");
     TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype int32");
     TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype int32");
 
@@ -727,19 +727,19 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     if (q_dtype == torch::kFloat8_e4m3fn) {
         TORCH_CHECK(descale_q_.has_value());
         TORCH_CHECK(descale_k_.has_value());
-        TORCH_CHECK(descale_v_.has_value());
+//        TORCH_CHECK(descale_v_.has_value());
         descale_q = descale_q_.value();
         descale_k = descale_k_.value();
-        descale_v = descale_v_.value();
+//        descale_v = descale_v_.value();
         TORCH_CHECK(descale_q.is_contiguous());
         TORCH_CHECK(descale_k.is_contiguous());
-        TORCH_CHECK(descale_v.is_contiguous());
+//        TORCH_CHECK(descale_v.is_contiguous());
         CHECK_SHAPE(descale_q, num_heads, total_q);
         CHECK_SHAPE(descale_k, num_heads_k, k.size(0));
-        CHECK_SHAPE(descale_v, num_heads_k, head_size_v);
+//        CHECK_SHAPE(descale_v, num_heads_k, head_size_v);
         params.descale_q_ptr = descale_q.data_ptr();
         params.descale_k_ptr = descale_k.data_ptr();
-        params.descale_v_ptr = descale_v.data_ptr();
+//        params.descale_v_ptr = descale_v.data_ptr();
     }
 
     if (paged_KV) {

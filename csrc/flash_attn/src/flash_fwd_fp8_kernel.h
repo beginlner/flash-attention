@@ -28,6 +28,7 @@ template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local,
 __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params, const int bidb, const int bidh, const int m_block) {
 
     using Element = typename Kernel_traits::Element;
+    using VElement = typename Kernel_traits::VElement;
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -126,41 +127,43 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
     Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
                             make_stride(params.k_row_stride, _1{}));
-    Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.v_ptr) + row_offset_v),
+    Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<VElement *>(params.v_ptr) + row_offset_v),
                             Shape<Int<kBlockN>, Int<kHeadDimV>>{},
                             make_stride(params.v_row_stride, _1{}));
-    Tensor gP = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.p_ptr) + row_offset_p),
+    Tensor gP = make_tensor(make_gmem_ptr(reinterpret_cast<VElement *>(params.p_ptr) + row_offset_p),
                             Shape<Int<kBlockM>, Int<kBlockN>>{},
                             make_stride(params.seqlen_k_rounded, _1{}));
 
     Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
                             typename Kernel_traits::SmemLayoutQ{});
     Tensor sK = make_tensor(sQ.data() + size(sQ), typename Kernel_traits::SmemLayoutK{});
-    Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutV{});
-    Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVt{});
+    Tensor sV = make_tensor(recast_ptr<VElement>(sK.data() + size(sK)), typename Kernel_traits::SmemLayoutV{});
+    Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtTrain{});
 
-    auto smem_tiled_copy_V = typename Kernel_traits::SmemTiledCopyV{};
-    auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
-    Tensor tcVsV = smem_thr_copy_V.partition_S(sV);
-
-    auto smem_tiled_copy_Vt = typename Kernel_traits::SmemTiledCopyVt{};
-    auto smem_thr_copy_Vt = smem_tiled_copy_Vt.get_thread_slice(tidx);
-    Tensor tcVsVt = smem_thr_copy_Vt.partition_D(sVt);
-
-    Tensor tcVrV = make_tensor<Element>(make_shape(Shape<_8, _1>{}, shape<1>(tcVsV), shape<2>(tcVsV)));
-    Tensor tcVrVt = make_tensor(tcVrV.data(), make_layout(layout<0>(tcVrV), layout<2>(tcVrV), layout<1>(tcVrV)));
-    static_assert(size<1>(tcVsVt) == size<1>(tcVrVt));
-    static_assert(size<2>(tcVsVt) == size<2>(tcVrVt));
+//    auto smem_tiled_copy_V = typename Kernel_traits::SmemTiledCopyV{};
+//    auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
+//    Tensor tcVsV = smem_thr_copy_V.partition_S(sV);
+//
+//    auto smem_tiled_copy_Vt = typename Kernel_traits::SmemTiledCopyVt{};
+//    auto smem_thr_copy_Vt = smem_tiled_copy_Vt.get_thread_slice(tidx);
+//    Tensor tcVsVt = smem_thr_copy_Vt.partition_D(sVt);
+//
+//    Tensor tcVrV = make_tensor<VElement>(make_shape(Shape<_8, _1>{}, shape<1>(tcVsV), shape<2>(tcVsV)));
+//    Tensor tcVrVt = make_tensor(tcVrV.data(), make_layout(layout<0>(tcVrV), layout<2>(tcVrV), layout<1>(tcVrV)));
+//    static_assert(size<1>(tcVsVt) == size<1>(tcVrVt));
+//    static_assert(size<2>(tcVsVt) == size<2>(tcVrVt));
 
     typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
+    typename Kernel_traits::GmemTiledCopyV gmem_tiled_copy_V;
+    auto gmem_thr_copy_V = gmem_tiled_copy_V.get_thread_slice(tidx);
 
     Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
     Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
     Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K)
     Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
-    Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
-    Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
+    Tensor tVgV = gmem_thr_copy_V.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
+    Tensor tVsV = gmem_thr_copy_V.partition_D(sV);
 
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
@@ -176,7 +179,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
     Tensor tOrO_mma = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_o = make_tensor(tOrO_mma.data(), flash::convert_gmma_to_mma_tensor(tOrO_mma.layout()));  // (4, MMA_M, X)
 
-    auto reg2reg = ReorgCFp8toAFp8();
+//    auto reg2reg = ReorgCFp8toAFp8();
 
     // FP8 scales
     float* __restrict__ Descale_Q = reinterpret_cast<float *>(params.descale_q_ptr) + bidh * params.cu_seqlens_q[params.b] + binfo.sum_s_q + m_block * kBlockM;  // (kBlockM)
@@ -196,9 +199,10 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         Tensor acc_s_rowcol = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         for(int i=0;i<size<0>(acc_s_rowcol);i++) for(int j=0;j<size<1>(acc_s_rowcol);j++) acc_s_rowcol(i, j)*=descale_q[i/2][i%2]*descale_k[j/2][j%2];
     };
-    float Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
-    // Note that Descale_S is included by softmax.rowsum, so we need to divide it in lse but not in dO.
-    float Descale_S = 1.0f / Scale_S;
+    float Scale_S = 1.0f, Descale_S = 1.0f;
+//    float Scale_S = std::is_same_v<Element, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
+//    // Note that Descale_S is included by softmax.rowsum, so we need to divide it in lse but not in dO.
+//    float Descale_S = 1.0f / Scale_S;
 
     //
     // PREDICATES
@@ -211,6 +215,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
     // Construct identity layout for sQ and sK
     Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
+    Tensor cV = make_identity_tensor(make_shape(size<0>(sV), size<1>(sV)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
     // Tensor tScQ = thr_mma.partition_A(cQ);                           // (MMA,MMA_M,MMA_K)
     // if (cute::thread0()) {
     //     print(tScQ.layout()); printf("\n");
@@ -227,6 +232,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
     // Repeat the partitioning with identity layouts
     Tensor tQcQ = gmem_thr_copy_QKV.partition_S(cQ);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
     Tensor tKVcKV = gmem_thr_copy_QKV.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
+    Tensor tVcV = gmem_thr_copy_V.partition_S(cV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
 
     // Allocate predicate tensors for k
     Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
@@ -283,11 +289,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         // Advance gV
         if (masking_step > 0) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
-            flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV);
+            flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_V, tVgV, tVsV, tVcV, tKVpKV);
         } else {
             // Clear the smem tiles to account for predicated off loads
             flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
-                gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
+                    gmem_tiled_copy_V, tVgV, tVsV, tVcV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
             );
         }
         cute::cp_async_fence();
@@ -312,11 +318,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
             load_descale_k();
         }
 
-        cute::copy(smem_tiled_copy_V, tcVsV, tcVrV);
-        permute_fp8(tcVrV);
-        __syncthreads();
-        cute::copy(smem_tiled_copy_Vt, tcVrVt, tcVsVt);
-        __syncthreads();
+//        cute::copy(smem_tiled_copy_V, tcVsV, tcVrV);
+//        permute_fp8(tcVrV);
+//        __syncthreads();
+//        cute::copy(smem_tiled_copy_Vt, tcVrVt, tcVsVt);
+//        __syncthreads();
 
         // TODO: when we have key_padding_mask we'll need to Check_inf
         masking_step == 0
@@ -324,7 +330,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
             : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local>(acc_s, acc_o, params.scale_softmax_log2, Scale_S);
 
         // Convert acc_s from fp32 to fp16/bf16/fp8
-        Tensor rP = flash::convert_type<Element>(acc_s);
+        Tensor rP = flash::convert_type<VElement>(acc_s);
         int block_row_idx = m_block * (kBlockM / 16) + tidx / 32;
         int block_col_idx = n_block * (kBlockN / 32);
         if (Return_softmax) {
@@ -343,8 +349,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         // or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
-        Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        reg2reg(tOrP);
+        Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMmaO>(rP.layout()));
+//        reg2reg(tOrP);
         // if (cute::thread0()) { print(tOrP); }
         flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO_mma);
         // if (cute::thread0()) { print(scores); }
@@ -363,7 +369,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         __syncthreads();
         // Advance gV
         tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
-        flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV);
+        flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_V, tVgV, tVsV, tVcV, tKVpKV);
         cute::cp_async_fence();
 
         flash::gemm(tiled_mma, tSrQ, tSrK, tSrS);
@@ -381,11 +387,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
             load_descale_k();
         }
 
-        cute::copy(smem_tiled_copy_V, tcVsV, tcVrV);
-        permute_fp8(tcVrV);
-        __syncthreads();
-        cute::copy(smem_tiled_copy_Vt, tcVrVt, tcVsVt);
-        __syncthreads();
+//        cute::copy(smem_tiled_copy_V, tcVsV, tcVrV);
+//        permute_fp8(tcVrV);
+//        __syncthreads();
+//        cute::copy(smem_tiled_copy_Vt, tcVrVt, tcVsVt);
+//        __syncthreads();
 
         mask.template apply_mask</*Causal_mask=*/false>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
@@ -393,7 +399,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
 
         softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2, Scale_S);
 
-        Tensor rP = flash::convert_type<Element>(acc_s);
+        Tensor rP = flash::convert_type<VElement>(acc_s);
         int block_row_idx = m_block * (kBlockM / 16) + tidx / 32;
         int block_col_idx = n_block * (kBlockN / 32);
         if (Return_softmax) {
@@ -412,19 +418,19 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
         // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
         // or to ((4, 4), MMA_M, MMA_N / 4) if using fp8.
-        Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
-        reg2reg(tOrP);
+        Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMmaO>(rP.layout()));
+//        reg2reg(tOrP);
         flash::gemm(tiled_mma_o, tOrP, tOrVt, tOrO_mma);
     }
 
     // Epilogue
 
-    float* __restrict__ Descale_V = reinterpret_cast<float *>(params.descale_v_ptr) + (bidh / params.h_h_k_ratio) * kHeadDimV;  // (kHeadDimV)
-    float descale_v[size<2>(acc_o)][2];
-    for(int i=0;i<size<2>(acc_o);i++) *(float2*)&(descale_v[i][0]) = *(float2*)&(Descale_V[i*8 + tidx%4*2]);
+//    float* __restrict__ Descale_V = reinterpret_cast<float *>(params.descale_v_ptr) + (bidh / params.h_h_k_ratio) * kHeadDimV;  // (kHeadDimV)
+//    float descale_v[size<2>(acc_o)][2];
+//    for(int i=0;i<size<2>(acc_o);i++) *(float2*)&(descale_v[i][0]) = *(float2*)&(Descale_V[i*8 + tidx%4*2]);
     // Reshape acc_s from (MMA=4, MMA_M, MMA_K) to (nrow=(2, MMA_M), ncol=(2, MMA_K))
     Tensor acc_o_rowcol = make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol(acc_o.layout()));
-    for(int i=0;i<size<0>(acc_o_rowcol);i++) for(int j=0;j<size<1>(acc_o_rowcol);j++) acc_o_rowcol(i, j)*=descale_v[j/2][j%2];
+//    for(int i=0;i<size<0>(acc_o_rowcol);i++) for(int j=0;j<size<1>(acc_o_rowcol);j++) acc_o_rowcol(i, j)*=descale_v[j/2][j%2];
     Tensor lse = softmax.template normalize_softmax_lse<Is_dropout>(acc_o, params.scale_softmax, params.rp_dropout, Descale_S);
 
     // Convert acc_o from fp32 to fp16/bf16
