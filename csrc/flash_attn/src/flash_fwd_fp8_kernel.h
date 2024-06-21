@@ -185,7 +185,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
     float* __restrict__ Descale_K = reinterpret_cast<float *>(params.descale_k_ptr) + (bidh / params.h_h_k_ratio) * params.cu_seqlens_k[params.b] + binfo.sum_s_k + (n_block_max - 1) * kBlockN;  // (kBlockN)
     float descale_k[size<2>(acc_s)][2];
     auto load_descale_k = [&](){
-        for(int i=0;i<size<2>(acc_s);i++) *(float2*)&(descale_k[i][0]) = *(float2*)&(Descale_K[i*8 + tidx%4*2]);
+        for(int i=0;i<size<2>(acc_s);i++) for(int j=0;j<2;j++) descale_k[i][j] = Descale_K[i*8 + tidx%4*2 + j];
+        // The following line causes misaligned address in varlen.
+        // for(int i=0;i<size<2>(acc_s);i++) *(float2*)&(descale_k[i][0]) = *(float2*)&(Descale_K[i*8 + tidx%4*2]);
         Descale_K -= kBlockN;
     };
     load_descale_k();
