@@ -4,10 +4,6 @@
 
 #pragma once
 
-#ifdef __CLION_IDE__
-#define __CUDA_ARCH__ 900 // NOLINT(*-reserved-identifier)
-#endif
-
 #include "cute/algorithm/copy.hpp"
 
 #include "cutlass/cutlass.h"
@@ -32,26 +28,17 @@ template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayout
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename elem_type=cutlass::half_t>
 struct Flash_kernel_traits {
 
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
     using Element = elem_type;
     static constexpr bool Has_cp_async = true;
-#else
-    using Element = cutlass::half_t;
-    static constexpr bool Has_cp_async = false;
-#endif
 
     using ElementAccum = float;
     using index_t = int64_t;
 
-#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
     using MMA_Atom_Arch = std::conditional_t<
         std::is_same_v<elem_type, cutlass::half_t>,
         MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
         MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>
     >;
-#else
-    using MMA_Atom_Arch = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
-#endif
 };
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
