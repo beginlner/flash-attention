@@ -68,6 +68,10 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kNThreadsS = kNWarpsS * 32;
     static_assert(kNThreads % kNThreadsS == 0);
 
+    static constexpr int ClusterSize = 1;
+    using ClusterShape = Shape<Int<ClusterSize>, _1, _1>;
+    using TMA_LOAD = SM90_TMA_LOAD;
+
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
     static constexpr int kHeadDim = kHeadDim_;
@@ -108,12 +112,8 @@ struct Flash_fwd_kernel_traits : public Base {
     using SmemLayoutVtransposed = decltype(
         composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
 
-    using SmemLayoutAtomO = decltype(
-        composition(Swizzle<kSwizzle, 3, 3>{},
-                    Layout<Shape<Int<8>, Int<kBlockKSmem>>,
-                           Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutO = decltype(tile_to_shape(
-        SmemLayoutAtomO{},
+        getSmemLayoutK<Element, kHeadDimV>(),
         Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
     using SmemCopyAtomO = Copy_Atom<SM90_U32x4_STSM_N, Element>;
     using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;

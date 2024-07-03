@@ -9,6 +9,7 @@
 #endif
 
 #include <ATen/cuda/CUDAContext.h>
+#include <cutlass/cluster_launch.hpp>
 
 #include "static_switch.h"
 #include "flash.h"
@@ -30,14 +31,14 @@
 template<typename Kernel_traits, __VA_ARGS__> \
 __global__ void __launch_bounds__(256, 1, 1) kernelName(KERNEL_PARAM_MODIFIER const Flash_fwd_params params)
 
-DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_kernel, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax) {
-    #if defined(ARCH_SUPPORTS_FLASH)
-        static_assert(!(Is_causal && Is_local)); // Enforce constraints
-        flash::compute_attn<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Return_softmax>(params);
-    #else
-        FLASH_UNSUPPORTED_ARCH
-    #endif
-}
+//DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_kernel, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax) {
+//    #if defined(ARCH_SUPPORTS_FLASH)
+//        static_assert(!(Is_causal && Is_local)); // Enforce constraints
+//        flash::compute_attn<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Return_softmax>(params);
+//    #else
+//        FLASH_UNSUPPORTED_ARCH
+//    #endif
+//}
 
 DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_kernel, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV) {
     #if defined(ARCH_SUPPORTS_FLASH)
@@ -52,11 +53,48 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int L
     flash::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
 }
 
+template<typename Kernel_traits, typename TmaQ, typename TmaK, typename TmaV, typename TmaO, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax>
+__global__ void __launch_bounds__(256) flash_fwd_kernel(KERNEL_PARAM_MODIFIER const Flash_fwd_params params, KERNEL_PARAM_MODIFIER const TmaQ tmaQ, KERNEL_PARAM_MODIFIER const TmaK tmaK, KERNEL_PARAM_MODIFIER const TmaV tmaV, KERNEL_PARAM_MODIFIER const TmaO tmaO) {
+    flash::compute_attn<Kernel_traits, TmaQ, TmaK, TmaV, TmaO, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Return_softmax>(params, tmaQ, tmaK, tmaV, tmaO);
+}
+
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+    Tensor gQ = make_tensor(recast_ptr<typename Kernel_traits::Element>(params.q_ptr),
+                            make_shape(params.total_q, params.d, params.h),
+                            make_stride(params.q_row_stride, 1, params.q_head_stride));
+    auto tmaQ = make_tma_copy(SM90_TMA_LOAD{},
+                              gQ,
+                              typename Kernel_traits::SmemLayoutQ{},
+                              Shape<Int<Kernel_traits::kBlockM>, Int<Kernel_traits::kHeadDim>>{},
+                              _1{});
+    Tensor gK = make_tensor(recast_ptr<typename Kernel_traits::Element>(params.k_ptr),
+                            make_shape(params.total_k, params.d, params.h_k),
+                            make_stride(params.k_row_stride, 1, params.k_head_stride));
+    auto tmaK = make_tma_copy(typename Kernel_traits::TMA_LOAD{},
+                              gK,
+                              typename Kernel_traits::SmemLayoutK{},
+                              Shape<Int<Kernel_traits::kBlockN>, Int<Kernel_traits::kHeadDim>>{},
+                              size<0>(typename Kernel_traits::ClusterShape{}));
+    Tensor gV = make_tensor(recast_ptr<typename Kernel_traits::Element>(params.v_ptr),
+                            make_shape(params.total_k, params.d_v, params.h_k),
+                            make_stride(params.v_row_stride, 1, params.v_head_stride));
+    auto tmaV = make_tma_copy(typename Kernel_traits::TMA_LOAD{},
+                              gV,
+                              typename Kernel_traits::SmemLayoutV{},
+                              Shape<Int<Kernel_traits::kBlockN>, Int<Kernel_traits::kHeadDimV>>{},
+                              size<0>(typename Kernel_traits::ClusterShape{}));
+    Tensor gO = make_tensor(recast_ptr<typename Kernel_traits::Element>(params.o_ptr),
+                            make_shape(params.total_q, params.d_v, params.h),
+                            make_stride(params.o_row_stride, 1, params.o_head_stride));
+    auto tmaO = make_tma_copy(SM90_TMA_STORE{},
+                              gO,
+                              typename Kernel_traits::SmemLayoutO{},
+                              Shape<Int<Kernel_traits::kBlockM>, Int<Kernel_traits::kHeadDimV>>{},
+                              _1{});
     static_assert(!Kernel_traits::Is_Q_in_regs, "sm90 implementation does not support Is_Q_in_regs");
     static_assert(!Kernel_traits::Share_Q_K_smem, "sm90 implementation does not support Share_Q_K_smem");
-    constexpr size_t smem_size = Kernel_traits::kSmemSize;
+    constexpr size_t smem_size = Kernel_traits::kSmemSize + 1024;
     // printf("smem_size = %d\n", smem_size);
 
     // Work-around for gcc 7. It doesn't like nested BOOL_SWITCH.
@@ -78,7 +116,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                         // If return_softmax, set IsEvenMNConst to false to reduce number of templates
                         // If head dim > 128, set IsEvenMNConst to false to reduce number of templates
                         // If Is_local, set Is_causal to false
-                        auto kernel = &flash_fwd_kernel<Kernel_traits, Is_dropout, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && IsEvenKConst && !Is_local && !ReturnSoftmaxConst && Kernel_traits::kHeadDim <= 128, IsEvenKConst, ReturnSoftmaxConst && Is_dropout>;
+                        auto kernel = &flash_fwd_kernel<Kernel_traits, decltype(tmaQ), decltype(tmaK), decltype(tmaV), decltype(tmaO), Is_dropout, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && IsEvenKConst && !Is_local && !ReturnSoftmaxConst && Kernel_traits::kHeadDim <= 128, IsEvenKConst, ReturnSoftmaxConst && Is_dropout>;
                         // auto kernel = &flash_fwd_kernel<Kernel_traits, false, Is_causal, false, false, true, true, false>;
                         // printf("IsEvenMNConst = %d, IsEvenKConst = %d, Is_local = %d, Is_causal = %d, ReturnSoftmaxConst = %d, Is_dropout = %d\n", int(IsEvenMNConst), int(IsEvenKConst), int(Is_local), int(Is_causal), int(ReturnSoftmaxConst), int(Is_dropout));
                         // auto kernel = &flash_fwd_kernel<Kernel_traits, false, Is_causal, false, true, true, false>;
@@ -90,7 +128,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                         // cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                         //     &ctas_per_sm, kernel, Kernel_traits::kNThreads, smem_size);
                         // printf("smem_size = %d, CTAs per SM = %d\n", int(smem_size), ctas_per_sm);
-                        kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
+                        cutlass::ClusterLaunchParams launch_params{grid, Kernel_traits::kNThreads, {size<0>(typename Kernel_traits::ClusterShape{}), 1, 1}, int(smem_size), stream};
+                        cutlass::launch_kernel_on_cluster(launch_params, (const void *)kernel, params, tmaQ, tmaK, tmaV, tmaO);
                         C10_CUDA_KERNEL_LAUNCH_CHECK();
                     });
                 });

@@ -722,6 +722,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      window_size_right,
                      seqlenq_ngroups_swapped);
     params.d_v = head_size_v;
+    params.total_q = q.size(0);
+    params.total_k = k.size(0);
 
     at::Tensor descale_q, descale_k, descale_v;
     if (q_dtype == torch::kFloat8_e4m3fn) {
