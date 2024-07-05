@@ -308,16 +308,12 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             assert fp8_type[0] == "e4m3"
             assert fp8_type[1] == "bf16"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_token_cast_to_fp8(q_origin.contiguous().view(-1, q_origin.shape[-1]), "e4m3")
-            k, descale_k = hfai_fp8.per_token_cast_to_fp8(k_origin.contiguous().view(-1, k_origin.shape[-1]), "e4m3")
-            v, descale_v = hfai_fp8.per_channel_cast_to_fp8(v_origin.contiguous().view(v_origin.shape[0], -1), "e4m3")
-
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin.contiguous(), "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
             q = q.view(*q_origin.shape)
             k = k.view(*k_origin.shape)
-            v = v.view(*v_origin.shape)
-            descale_q = descale_q.view(*q_origin.shape[:-1]).t().contiguous()  # [h, n]
-            descale_k = descale_k.view(*k_origin.shape[:-1]).t().contiguous()  # [h, n]
-            descale_v = descale_v.view(*v_origin.shape[1:])  # [h, d]
+            v = v_origin
+            descale_v = None
         else:
             q, k, v = q_origin, k_origin, v_origin
             descale_q = None
@@ -486,15 +482,10 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             assert fp8_type[0] == "e4m3"
             assert fp8_type[1] == "bf16"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_token_cast_to_fp8(q_origin.contiguous().view(-1, q_origin.shape[-1]), "e4m3")
-            k, descale_k = hfai_fp8.per_token_cast_to_fp8(k_origin.contiguous().view(-1, k_origin.shape[-1]), "e4m3")
-            # v, descale_v = hfai_fp8.per_channel_cast_to_fp8(v_origin.contiguous().view(v_origin.shape[0], -1), "e4m3")
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin.contiguous(), "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
             q = q.view(*q_origin.shape)
             k = k.view(*k_origin.shape)
-            # v = v.view(*v_origin.shape)
-            descale_q = descale_q.view(*q_origin.shape[:-1]).t().contiguous()  # [h, n]
-            descale_k = descale_k.view(*k_origin.shape[:-1]).t().contiguous()  # [h, n]
-            # descale_v = descale_v.view(*v_origin.shape[1:])  # [h, d]
             v = v_origin
             descale_v = None
         else:
@@ -674,15 +665,12 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             assert fp8_type[0] == "e4m3"
             assert fp8_type[1] == "bf16"
             import hfai_fp8
-            q, descale_q = hfai_fp8.per_token_cast_to_fp8(q_origin.contiguous().view(-1, q_origin.shape[-1]), "e4m3")
-            k, descale_k = hfai_fp8.per_token_cast_to_fp8(k_origin.contiguous().view(-1, k_origin.shape[-1]), "e4m3")
-            v, descale_v = hfai_fp8.per_channel_cast_to_fp8(v_origin.contiguous().view(v_origin.shape[0], -1), "e4m3")
+            q, descale_q = hfai_fp8.per_tensor_cast_to_fp8(q_origin.contiguous(), "e4m3")
+            k, descale_k = hfai_fp8.per_tensor_cast_to_fp8(k_origin.contiguous(), "e4m3")
             q = q.view(*q_origin.shape)
             k = k.view(*k_origin.shape)
-            v = v.view(*v_origin.shape)
-            descale_q = descale_q.view(*q_origin.shape[:-1]).t().contiguous()  # [h, n]
-            descale_k = descale_k.view(*k_origin.shape[:-1]).t().contiguous()  # [h, n]
-            descale_v = descale_v.view(*v_origin.shape[1:])  # [h, d]
+            v = v_origin
+            descale_v = None
         else:
             q, k, v = q_origin, k_origin, v_origin
             descale_q = None
