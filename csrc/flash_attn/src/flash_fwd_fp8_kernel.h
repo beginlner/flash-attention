@@ -510,7 +510,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_fp8(const Params 
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
     }
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
-        if (!Is_local) { return; }
+        if (Split && !Is_local) { return; }
         if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
             return;
         }
