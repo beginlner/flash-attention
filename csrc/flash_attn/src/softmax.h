@@ -208,4 +208,24 @@ struct Softmax {
     };
 };
 
+template<typename ElementAccum, typename Params, int kBlockM, bool Is_even_MN>
+__forceinline__ __device__ auto get_lse_tile(const Params &params, const int bidb, const int bidh, const int m_block, const BlockInfo</*Varlen=*/!Is_even_MN> &binfo) {
+    // When params.unpadded_lse is false, LSE is written as (b, h, seqlen_q) - this is non-variable seqlen path.
+    // Otherwise, when params.seqlenq_ngroups_swapped is true, it is written as (h, seqlen_q, b) to account for seqlen_q <-> h swapping trick.
+    // Otherwise, it's written as (h, b, seqlen_q).
+    const bool varlen_q = params.unpadded_lse && !params.seqlenq_ngroups_swapped;
+    auto lse_offset = varlen_q ? binfo.q_offset(params.seqlen_q, 1, bidb) : 0;
+    auto gmem_ptr_lse = make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.softmax_lse_ptr) + lse_offset);
+
+    auto lse_shape = varlen_q ? make_shape(1, params.h, params.total_q) : make_shape(params.b, params.h, params.seqlen_q);
+    auto lse_stride = params.seqlenq_ngroups_swapped ? make_stride(1, params.seqlen_q * params.b, params.b) : (
+            params.unpadded_lse ? make_stride(params.h * params.total_q, params.total_q, 1) :  make_stride(params.h * params.seqlen_q, params.seqlen_q, 1)
+    );
+
+    auto lse_layout = make_layout(lse_shape, lse_stride);
+    Tensor mLSE = make_tensor(gmem_ptr_lse, lse_layout);
+    auto mLSE_slice = varlen_q ? mLSE(0, bidh, _) : mLSE(bidb, bidh, _);
+    return local_tile(mLSE_slice, Shape<Int<kBlockM>>{}, make_coord(m_block));
+}
+
 }  // namespace flash

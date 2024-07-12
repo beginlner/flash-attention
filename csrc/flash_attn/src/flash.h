@@ -73,8 +73,11 @@ struct Flash_fwd_params : public Qkv_params {
     void * __restrict__ softmax_lse_ptr;
     void * __restrict__ softmax_lseaccum_ptr;
 
+    bool unpadded_lse;  // For varlen paths: LSE is in [nheads, total_seqlen_q] format instead of [b, nheads, seqlen_q].
+    bool seqlenq_ngroups_swapped;  // q has been transposed from (b, 1, (nheads_kv ngroups), d) to (b, ngroups, nheads_kv, d).
+
     // The dimensions.
-    int b, seqlen_q, seqlen_k, seqlen_knew, d, d_v, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim;
+    int b, seqlen_q, seqlen_k, seqlen_knew, d, d_v, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim, total_q;
 
     // The scaling factors for the kernel.
     float scale_softmax;

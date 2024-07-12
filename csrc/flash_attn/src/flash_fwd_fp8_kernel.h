@@ -76,8 +76,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
         Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.o_ptr) + row_offset_o),
                                 Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                                 make_stride(params.o_row_stride, _1{}));
-        Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
-                                  Shape<Int<kBlockM>>{}, Stride<_1>{});
+        Tensor gLSE = get_lse_tile<ElementAccum, Params, kBlockM, Is_even_MN>(params, bidb, bidh, m_block, binfo);
 
         typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
         auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
@@ -425,8 +424,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_fp8(const Params &params,
     Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<OutElement *>(params.o_ptr) + row_offset_o),
                             Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                             make_stride(params.o_row_stride, _1{}));
-    Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
-                              Shape<Int<kBlockM>>{}, Stride<_1>{});
+    Tensor gLSE = get_lse_tile<ElementAccum, Params, kBlockM, Is_even_MN>(params, bidb, bidh, m_block, binfo);
 
     typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);

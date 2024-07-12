@@ -985,7 +985,7 @@ def flash_attn_varlen_qkvpacked_func(
            (they might not have the right scaling).
     Return:
         out: (total, nheads, headdim).
-        softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
+        softmax_lse [optional, if return_attn_probs=True]: (nheads, total_q_seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
         S_dmask [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen, seqlen).
@@ -1072,7 +1072,7 @@ def flash_attn_varlen_kvpacked_func(
            (they might not have the right scaling).
     Return:
         out: (total, nheads, headdim).
-        softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
+        softmax_lse [optional, if return_attn_probs=True]: (nheads, total_q_seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
         S_dmask [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen, seqlen).
@@ -1162,7 +1162,7 @@ def flash_attn_varlen_func(
            (they might not have the right scaling).
     Return:
         out: (total, nheads, headdim).
-        softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
+        softmax_lse [optional, if return_attn_probs=True]: (nheads, total_q_seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
         S_dmask [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen, seqlen).

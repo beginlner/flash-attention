@@ -48,7 +48,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       float softmax_scale,
                       int window_size_left,
                       int window_size_right,
-                      bool seqlenq_ngroups_swapped=false) {
+                      bool seqlenq_ngroups_swapped=false,
+                      const bool unpadded_lse=false) {
 
     // Reset the parameters
     params = {};
@@ -141,6 +142,9 @@ void set_params_fprop(Flash_fwd_params &params,
     #ifdef FLASHATTENTION_DISABLE_UNEVEN_K
         TORCH_CHECK(d == d_rounded, "This flash attention build does not support headdim not being a multiple of 32.");
     #endif
+
+    params.unpadded_lse = unpadded_lse;
+    params.seqlenq_ngroups_swapped = seqlenq_ngroups_swapped;
 }
 
 void set_params_dgrad(Flash_bwd_params &params,
@@ -174,7 +178,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                       float softmax_scale,
                       int window_size_left,
                       int window_size_right,
-                      bool deterministic) {
+                      bool deterministic,
+                      const bool unpadded_lse=false) {
 
     set_params_fprop(params,
                      b, seqlen_q, seqlen_k, seqlen_q_rounded, seqlen_k_rounded, h, h_k, d, d_rounded,
@@ -187,7 +192,9 @@ void set_params_dgrad(Flash_bwd_params &params,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
-                     window_size_right);
+                     window_size_right,
+                     false,
+                     unpadded_lse);
 
     params.fp8_type = dout.dtype() == torch::kFloat8_e4m3fn ? 1 : dout.dtype() == torch::kFloat8_e5m2 ? 2 : 0;
 
@@ -689,7 +696,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 
     auto opts = q.options();
 
-    auto softmax_lse = torch::empty({batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
+    auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
     at::Tensor p;
     // Only return softmax if there's dropout to reduce compilation time
     if (return_softmax) {
@@ -720,7 +727,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      softmax_scale,
                      window_size_left,
                      window_size_right,
-                     seqlenq_ngroups_swapped);
+                     seqlenq_ngroups_swapped,
+                     true);
+    params.total_q = total_q;
     params.d_v = head_size_v;
 
     at::Tensor descale_q, descale_k, descale_v;
@@ -785,7 +794,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         int64_t out_size_after[] = {batch_size, num_heads_k * max_seqlen_q, head_size_v};
         out = out.reshape(out_size_before).transpose(1, 2).reshape(out_size_after);
         q_padded = q_padded.reshape(size_before).transpose(1, 2).reshape(size_after);
-        softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * max_seqlen_q, 1});
+        softmax_lse = softmax_lse.reshape({num_heads_k * max_seqlen_q, batch_size});
     }
 
     return {out, q_padded, k_padded, v_padded, out, softmax_lse, p, rng_state};
@@ -1049,7 +1058,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
                c10::optional<at::Tensor> &descale_k_,
                c10::optional<at::Tensor> &descale_v_,
                const at::Tensor &out,   // total_q x num_heads x head_size_v
-               const at::Tensor &softmax_lse,     // b x h x s   softmax logsumexp
+               const at::Tensor &softmax_lse,     // num_heads x total_q, total_q := \sum_{i=0}^{b} s_i
                c10::optional<at::Tensor> &dq_,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
                c10::optional<at::Tensor> &dk_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
                c10::optional<at::Tensor> &dv_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
@@ -1184,7 +1193,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-    auto softmax_d = torch::empty({batch_size, num_heads, seqlen_q_rounded}, opts.dtype(at::kFloat));
+    auto softmax_d = torch::empty({num_heads, total_q + 128 * batch_size}, opts.dtype(at::kFloat));
     at::Tensor dq_accum;
     if (loop) {
         // We don't want to allocate dq_accum of size (batch, seqlen_q_rounded, num_heads, head_size_rounded)
@@ -1195,6 +1204,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
         // cu_seqlens[i + 1] * 128 * i - 1. This ensures that the i-th sequence and (i + 1)-th sequence will
         // be at least 128 apart. It's ok for us to do atomicAdds up to 128 rows beyond what we're normally
         // allowed to do. So we won't have to do any bound checking, and performance should stay the same.
+        // Same holds for softmax_d, since LSE is stored in unpadded format.
         if (!deterministic) {
             dq_accum = torch::empty({total_q + 128 * batch_size, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
         } else {
@@ -1240,7 +1250,9 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
                      softmax_scale,
                      window_size_left,
                      window_size_right,
-                     deterministic);
+                     deterministic,
+                     true);
+    params.total_q = total_q;
     params.d_v = head_size_v;
     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
 
