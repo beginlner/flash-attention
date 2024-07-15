@@ -1235,6 +1235,9 @@ __forceinline__ __device__ void compute_attn_splitkv(const Params &params) {
     const int bidh = blockIdx.z - bidb * params.h;
     const int n_split_idx = blockIdx.y;
     const int num_n_splits = gridDim.y;
+    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
+    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
+    if (Split == NoSplit) return;
     if constexpr (sizeof_bits_v<typename Kernel_traits::Element> == 8)
         flash::compute_attn_1rowblock_splitkv_fp8<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
     else
@@ -1267,6 +1270,7 @@ __forceinline__ __device__ void combine_attn_seqk_parallel(const Params &params)
     // TODO: Assume Varlen
     const BlockInfo</*Varlen=*/true> binfo(params, bidx * kBlockM / (params.h * params.seqlen_q));
     const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(binfo.actual_seqlen_k, PARTITION_SIZE));
+    if (actual_num_splits == 1) return;
     const index_t row_offset_lse = bidx * kBlockM;
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
                                    Shape<Int<kMaxSplits>, Int<kBlockM>>{},
