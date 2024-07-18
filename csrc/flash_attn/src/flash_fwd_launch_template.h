@@ -99,6 +99,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
+std::shared_ptr<cudaStream_t> extra_stream_ptr = nullptr;
+
 template<typename T>
 void wait_stream(const T &stream0, const T &stream1) {
     cudaEvent_t event;
@@ -113,7 +115,8 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(!Kernel_traits::Is_Q_in_regs, "SplitKV implementation does not support Is_Q_in_regs");
     static_assert(!Kernel_traits::Share_Q_K_smem, "SplitKV implementation does not support Share_Q_K_smem");
     TORCH_CHECK(!params.unpadded_lse);
-    auto stream1 = at::cuda::getStreamFromPool(true).stream();
+    if (extra_stream_ptr == nullptr) extra_stream_ptr = std::make_shared<cudaStream_t>(at::cuda::getStreamFromPool(true).stream());
+    auto stream1 = *extra_stream_ptr;
     size_t smem_size = Kernel_traits::kSmemSize;
     const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
     const bool is_even_MN = params.cu_seqlens_q == nullptr && params.cu_seqlens_k == nullptr && params.seqlen_k % Kernel_traits::kBlockN == 0 && params.seqlen_q % Kernel_traits::kBlockM == 0;
