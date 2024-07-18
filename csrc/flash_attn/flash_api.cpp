@@ -22,6 +22,8 @@
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 
+std::shared_ptr<cudaStream_t> extra_stream_ptr = nullptr;
+
 
 void set_params_fprop(Flash_fwd_params &params,
                       // sizes

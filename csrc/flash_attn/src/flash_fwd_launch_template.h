@@ -99,7 +99,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
-std::shared_ptr<cudaStream_t> extra_stream_ptr = nullptr;
+extern std::shared_ptr<cudaStream_t> extra_stream_ptr;
 
 template<typename T>
 void wait_stream(const T &stream0, const T &stream1) {
