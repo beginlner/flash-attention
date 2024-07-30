@@ -150,7 +150,8 @@ struct Softmax {
 
     template<bool Is_first, bool Check_inf=false, bool rescale_o=true, typename ElementP=cutlass::float_e4m3_t, typename Tensor0, typename Tensor1>
     __forceinline__ __device__ TensorT softmax_rescale_o(Tensor0 &acc_s, Tensor1 &acc_o, float softmax_scale_log2, float Scale_S=1.0f) {
-        float FP8_MAX = std::is_same_v<ElementP, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
+        constexpr float FP8_MAX = std::is_same_v<ElementP, cutlass::float_e4m3_t> ? 448.0f : 57344.0f;
+        constexpr float EPS = 1e-30;
         // Reshape acc_s from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(decltype(size<0>(scores))::value == kNRows);
@@ -187,7 +188,7 @@ struct Softmax {
                     ? row_max(mi)
                     : (row_max(mi) == -INFINITY ? 0.0f : row_max(mi));
                 float amax_P = exp2f((row_block_max(mi) - scores_max_cur) * softmax_scale_log2);
-                row_block_scale_P(mi) = FP8_MAX / (amax_P == 0.0f ? 1.0f : amax_P);
+                row_block_scale_P(mi) = FP8_MAX / max(amax_P, EPS);
                 float scores_scale = exp2f((scores_max_prev(mi) - scores_max_cur) * softmax_scale_log2);
                 scale_o(mi) = scores_scale;
                 row_sum(mi) *= scores_scale;
