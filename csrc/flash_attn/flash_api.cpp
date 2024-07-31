@@ -365,6 +365,9 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
         int window_size_right,
         const bool return_softmax,
         c10::optional<at::Generator> gen_) {
+#ifdef FLASHATTENTION_DISABLE_EVEN_MN
+    TORCH_CHECK(false, "This flash attention build does not support mha_fwd, please use mha_varlen_fwd instead.");
+#endif
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
     // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
@@ -485,11 +488,6 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                      softmax_scale,
                      window_size_left,
                      window_size_right);
-
-
-    set_params_splitkv(params, batch_size, num_heads,
-                       head_size, seqlen_k, seqlen_q,
-                       head_size_rounded, p_dropout, /*num_splits*/0, dprops, opts);
 
     // number of times random will be generated per thread, to offset philox counter in thc random
     // state
