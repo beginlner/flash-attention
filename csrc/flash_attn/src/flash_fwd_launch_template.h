@@ -417,6 +417,18 @@ void run_mha_fwd_hdim256(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
+template<typename T>
+void run_mha_fwd_hdim320(Flash_fwd_params &params, cudaStream_t stream) {
+    constexpr static int Headdim = 320;
+    TORCH_CHECK(params.d_v == 256);
+    constexpr static int HeaddimV = 256;
+    DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+        BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 8, false, false, T, HeaddimV>, Is_dropout, Is_causal>(params, stream);
+        });
+    });
+}
+
 // fp8
 
 template<typename T, int Headdim>

@@ -602,7 +602,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int head_size_v = v.size(-1);
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
     if (head_size_v != head_size_og) {
-        TORCH_CHECK(head_size_og == 128 || head_size_og == 192, "head_size_qk must be 192");
+        TORCH_CHECK(head_size_og == 128 || head_size_og == 192 || head_size_og == 320, "head_size_qk must be 128 or 192 or 320");
         TORCH_CHECK(!paged_KV);
     }
     const int num_heads_k = paged_KV ? k.size(2) : k.size(1);
@@ -630,7 +630,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int total_q = q.sizes()[0];
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
-    TORCH_CHECK(head_size_og <= 256, "FlashAttention forward only supports head dimension at most 256");
+    TORCH_CHECK(head_size_og <= 320, "FlashAttention forward only supports head dimension at most 320");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
     if (window_size_left >= max_seqlen_k) { window_size_left = -1; }
@@ -1127,13 +1127,13 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads x head_size_v
     const int head_size_v = v.sizes()[2];
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
     if (head_size_v != head_size) {
-        TORCH_CHECK(head_size == 128 || head_size == 192, "head_size_qk must be 192");
+        TORCH_CHECK(head_size == 128 || head_size == 192 || head_size == 320, "head_size_qk must be 128 or 192 or 320");
     }
     const int total_k = k.size(0);
     const int num_heads_k = k.size(1);
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
-    TORCH_CHECK(head_size <= 256, "FlashAttention backward only supports head dimension at most 256");
+    TORCH_CHECK(head_size <= 320, "FlashAttention backward only supports head dimension at most 320");
     if (head_size > 192 && (head_size <= 224 || is_dropout)) {
         TORCH_CHECK(is_sm80 || is_sm90, "FlashAttention backward for head dim 256 with dropout, or head dim 224 with/without dropout requires A100/A800 or H100/H800");
     }

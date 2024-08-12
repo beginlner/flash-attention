@@ -246,6 +246,16 @@ void run_mha_bwd_hdim256(Flash_bwd_params &params, cudaStream_t stream) {
     });
 }
 
+template<typename T>
+void run_mha_bwd_hdim320(Flash_bwd_params &params, cudaStream_t stream) {
+    constexpr static int Headdim = 320;
+    TORCH_CHECK(params.d_v == 256);
+    constexpr static int HeaddimV = 256;
+    DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+        run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 4, 4, false, false, T, HeaddimV>, Is_dropout>(params, stream);
+    });
+}
+
 // fp8
 
 template<typename T, typename TGrad>
