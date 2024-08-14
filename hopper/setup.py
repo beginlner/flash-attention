@@ -114,6 +114,7 @@ if not SKIP_CUDA_BUILD:
         "flash_fwd_hdim64_bf16_sm90.cu",
         "flash_fwd_hdim128_fp16_sm90.cu",
         "flash_fwd_hdim128_bf16_sm90.cu",
+        "flash_fwd_hdim192_bf16_sm90.cu",
         "flash_fwd_hdim256_fp16_sm90.cu",
         "flash_fwd_hdim256_bf16_sm90.cu",
         "flash_bwd_hdim64_fp16_sm90.cu",
@@ -160,10 +161,10 @@ if not SKIP_CUDA_BUILD:
             name="flashattn_hopper_cuda",
             sources=sources,
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
+                "cxx": ["-O3", "-std=c++17", "-Wno-deprecated-declarations"],
                 # "cxx": ["-O0", "-std=c++17"],
                 "nvcc": append_nvcc_threads(
-                    nvcc_flags + cc_flag
+                    nvcc_flags + cc_flag + ["-Wno-deprecated-declarations"]
                 ),
             },
             include_dirs=include_dirs,

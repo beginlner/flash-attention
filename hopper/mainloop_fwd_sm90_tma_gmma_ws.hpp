@@ -84,6 +84,7 @@ struct CollectiveMainloopFwd {
 
     using Element = typename Ktraits::Element;
     using TileShape_MNK = typename Ktraits::TileShape_MNK;
+    using TileShapeV_MNK = typename Ktraits::TileShapeV_MNK;
     using ClusterShape = typename Ktraits::ClusterShape_MNK;
 
     static constexpr int kStages = Ktraits::kStages;
@@ -128,7 +129,7 @@ struct CollectiveMainloopFwd {
             typename Seqlen_traits::StrideT{}
         ),
         take<0, 2>(SmemLayoutV{}),
-        select<1, 2>(TileShape_MNK{}),
+        select<1, 2>(TileShapeV_MNK{}),
         size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
 
     static constexpr int NumMmaThreads = size(typename Ktraits::TiledMma0{});
@@ -140,6 +141,7 @@ struct CollectiveMainloopFwd {
     // Set the bytes transferred in this TMA transaction (may involve multiple issues)
     static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8);
+    static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutV{})) * cutlass::sizeof_bits_v<Element> / 8);
 
     // static constexpr bool UseSchedulerBarrier = kHeadDim <= 128;
     static constexpr bool UseSchedulerBarrier =
@@ -197,7 +199,7 @@ struct CollectiveMainloopFwd {
             GmemTiledCopyKV{},
             mV,
             SmemLayoutV{}(_, _, _0{}),
-            select<1, 2>(TileShape_MNK{}),
+            select<1, 2>(TileShapeV_MNK{}),
             size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
         return {args.layout_Q, args.layout_K, args.layout_V,
                 cutlass::FastDivmod(cute::ceil_div(get<2>(args.layout_Q.shape()), get<2>(args.layout_K.shape()))),
@@ -269,7 +271,7 @@ struct CollectiveMainloopFwd {
         Tensor gK = seqlen_traits_k.get_local_tile_tensor(
             mK, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb);  // (N, K, _)
         Tensor gV = seqlen_traits_k.get_local_tile_tensor(
-            mV, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb);  // (N, K, _)
+            mV, select<1, 2>(TileShapeV_MNK{}), bidh_kv, bidb);  // (N, K, _)
 
         Tensor sQ_x = make_tensor(sQ.data(), make_layout(sQ.layout(), Layout<_1>{}));
         Tensor gQ_x = make_tensor(gQ.data(), make_layout(gQ.layout(), Layout<_1>{}));
@@ -393,7 +395,7 @@ struct CollectiveMainloopFwd {
         Tensor gK = seqlen_traits_k.get_local_tile_tensor(
             mK, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb);  // (N, K, _)
         Tensor gV = seqlen_traits_k.get_local_tile_tensor(
-            mV, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb);  // (N, K, _)
+            mV, select<1, 2>(TileShapeV_MNK{}), bidh_kv, bidb);  // (N, K, _)
 
         Tensor sQ_x = make_tensor(sQ.data(), make_layout(sQ.layout(), Layout<_1>{}));
         Tensor gQ_x = make_tensor(gQ.data(), make_layout(gQ.layout(), Layout<_1>{}));

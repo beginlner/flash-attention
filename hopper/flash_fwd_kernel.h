@@ -35,7 +35,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
     using Element = typename Ktraits::Element;
     using ElementAccum = typename Ktraits::ElementAccum;
     using SoftType = ElementAccum;
-    using TileShape_MNK = typename Ktraits::TileShape_MNK;
+    using TileShape_MNK = typename Ktraits::TileShapeV_MNK;
     using ClusterShape = typename Ktraits::ClusterShape_MNK;
 
     static_assert(Ktraits::Is_WS);
@@ -84,6 +84,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
     }
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     MainloopPipeline pipeline_k(shared_storage.pipeline_k, pipeline_params, ClusterShape{});
+    pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
     MainloopPipeline pipeline_v(shared_storage.pipeline_v, pipeline_params, ClusterShape{});
 
     CollectiveMainloop collective_mainloop;
@@ -200,7 +201,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
     static_assert(cutlass::sizeof_bits_v<Element> == 8);
     using ElementAccum = typename Ktraits::ElementAccum;
     using SoftType = ElementAccum;
-    using TileShape_MNK = typename Ktraits::TileShape_MNK;
+    using TileShape_MNK = typename Ktraits::TileShapeV_MNK;
     using ClusterShape = typename Ktraits::ClusterShape_MNK;
 
     static_assert(Ktraits::Is_WS);
@@ -260,6 +261,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
     }
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     MainloopPipeline pipeline_k(shared_storage.pipeline_k, pipeline_params, ClusterShape{});
+    pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
     // pipeline_v has producer warpgroup for its consumer in fp8 kernel
     pipeline_params.num_consumers = NumCopyThreads;
     pipeline_params.role = MainloopPipeline::ThreadCategory::ProducerConsumer;
