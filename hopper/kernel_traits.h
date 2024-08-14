@@ -59,7 +59,7 @@ struct SharedStorageQKVOVt {
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, int kStages_, bool Is_Q_in_regs_=false,
-         int kClusterM_ = 1, typename elem_type=cutlass::half_t>
+         int kClusterM_ = 1, typename elem_type=cutlass::half_t, int kHeadDimV_=0>
 struct Flash_fwd_kernel_traits {
     using Element = elem_type;
     using ElementAccum = float;
@@ -79,8 +79,11 @@ struct Flash_fwd_kernel_traits {
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
     static constexpr int kHeadDim = kHeadDim_;
+    static constexpr int kHeadDimV = kHeadDimV_ > 0 ? kHeadDimV_ : kHeadDim_;
     static_assert(kHeadDim % 32 == 0);
+    static_assert(kHeadDimV % 32 == 0);
     using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+    using TileShapeV_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimV>>;
 
     static constexpr int kClusterM = kClusterM_;
     using ClusterShape_MNK = Shape<Int<kClusterM>, _1, _1>;
@@ -96,7 +99,7 @@ struct Flash_fwd_kernel_traits {
         >{},
         AtomLayoutMNK{}));
     using TiledMma1 = decltype(cute::make_tiled_mma(
-        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, decltype(select<0, 2, 1>(TileShape_MNK{})),
+        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, decltype(select<0, 2, 1>(TileShapeV_MNK{})),
                                    GMMA::Major::K, GMMA::Major::MN>(),
         AtomLayoutMNK{}));
 
@@ -111,21 +114,21 @@ struct Flash_fwd_kernel_traits {
                  make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{})));
 
     using SmemLayoutAtomV = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
-        decltype(cute::get<1>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
+        decltype(cute::get<1>(TileShapeV_MNK{})), decltype(cute::get<2>(TileShapeV_MNK{}))>());
     using SmemLayoutV =
         decltype(tile_to_shape(SmemLayoutAtomV{},
-                 make_shape(get<1>(TileShape_MNK{}), get<2>(TileShape_MNK{}), Int<kStages>{})));
+                 make_shape(get<1>(TileShapeV_MNK{}), get<2>(TileShapeV_MNK{}), Int<kStages>{})));
 
     // Note this is the transpose in terms of the view, not in terms of memory.
     using SmemLayoutVt =
         decltype(composition(SmemLayoutV{},
                     make_ordered_layout(
-                        make_shape(get<2>(TileShape_MNK{}), get<1>(TileShape_MNK{}), Int<kStages>{}),
+                        make_shape(get<2>(TileShapeV_MNK{}), get<1>(TileShapeV_MNK{}), Int<kStages>{}),
                         Step<_2, _1, _3>{})));
 
     using SmemLayoutAtomO = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, OutputType,
-        decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
-    using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 2>(TileShape_MNK{})));
+        decltype(cute::get<0>(TileShapeV_MNK{})), decltype(cute::get<2>(TileShapeV_MNK{}))>());
+    using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 2>(TileShapeV_MNK{})));
 
     using SmemCopyAtomQ = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
 
@@ -141,7 +144,7 @@ struct Flash_fwd_kernel_traits {
 
 // Traits struct for fp8 kernel with in-kernel transpose
 template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, int kStages_, bool Is_Q_in_regs_=false,
-         int kClusterM_ = 1, typename elem_type=cutlass::float_e4m3_t>
+         int kClusterM_ = 1, typename elem_type=cutlass::float_e4m3_t, int kHeadDimV_=0>
 struct Flash_fwd_kernel_traits_fp8 {
     using Element = elem_type;
     static_assert(cutlass::sizeof_bits_v<Element> == 8);
@@ -162,8 +165,11 @@ struct Flash_fwd_kernel_traits_fp8 {
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
     static constexpr int kHeadDim = kHeadDim_;
+    static constexpr int kHeadDimV = kHeadDimV_ > 0 ? kHeadDimV_ : kHeadDim_;
     static_assert(kHeadDim % 32 == 0);
+    static_assert(kHeadDimV % 32 == 0);
     using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+    using TileShapeV_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimV>>;
 
     static constexpr int kClusterM = kClusterM_;
     using ClusterShape_MNK = Shape<Int<kClusterM>, _1, _1>;
@@ -177,7 +183,7 @@ struct Flash_fwd_kernel_traits_fp8 {
         AtomLayoutMNK{}));
     
     using TiledMma1 = decltype(cute::make_tiled_mma(
-        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, decltype(select<0, 2, 1>(TileShape_MNK{}))>(),
+        cute::GMMA::rs_op_selector<Element, Element, ElementAccum, decltype(select<0, 2, 1>(TileShapeV_MNK{}))>(),
         AtomLayoutMNK{}));
 
     using SmemLayoutAtomQ = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
@@ -194,7 +200,7 @@ struct Flash_fwd_kernel_traits_fp8 {
     using SmemLayoutAtomV = decltype(tile_to_shape(GMMA::Layout_K_SW64_Atom<Element>{}, TransposeShapeAtomV{}));
     using SmemLayoutV =
         decltype(tile_to_shape(SmemLayoutAtomV{},
-                 make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{})));
+                 make_shape(shape<1>(TileShapeV_MNK{}), shape<2>(TileShapeV_MNK{}), Int<kStages>{})));
     
     // for fp8 in-kernel transpose -- src layout
     using SmemLayoutDivideV = decltype(tiled_divide(SmemLayoutV{}, TransposeShapeAtomV{}));
@@ -207,7 +213,7 @@ struct Flash_fwd_kernel_traits_fp8 {
     using SmemLayoutAtomVt = decltype(tile_to_shape(GMMA::Layout_K_SW64_Atom<Element>{}, TransposeShapeAtomV{}));
     using SmemLayoutVt =
         decltype(tile_to_shape(SmemLayoutAtomVt{},
-                 make_shape(shape<2>(TileShape_MNK{}), shape<1>(TileShape_MNK{}), Int<kStages>{})));
+                 make_shape(shape<2>(TileShapeV_MNK{}), shape<1>(TileShapeV_MNK{}), Int<kStages>{})));
 
     // for fp8 in-kernel transpose -- dst layout
     using SmemLayoutVtTrans =
@@ -224,18 +230,18 @@ struct Flash_fwd_kernel_traits_fp8 {
     using SmemLayoutTransposeVt = decltype(composition(SmemLayoutDivideVt{}, make_layout(FactoringShapeVt{})));
 
     using SmemLayoutAtomO = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, OutputType,
-        decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
-    using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 2>(TileShape_MNK{})));
+        decltype(cute::get<0>(TileShapeV_MNK{})), decltype(cute::get<2>(TileShapeV_MNK{}))>());
+    using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 2>(TileShapeV_MNK{})));
 
     // used for rmem -> smem O copy in fp8 kernel to undo column permutation
     using ThreadLayoutrO = Layout<Shape<_8, Int<kBlockM/16>, _4, _1>,
                                  Stride<_4, _32, _1, _0>>;
-    using ValueLayoutrO = Layout<Shape<_1, _2, Shape<_2, _2>, Int<kHeadDim/16>>,
+    using ValueLayoutrO = Layout<Shape<_1, _2, Shape<_2, _2>, Int<kHeadDimV/16>>,
                                 Stride<_0, _2, Stride<_4, _1>, _8>>;
     using TiledCopyrO = decltype(make_tiled_copy(Copy_Atom<UniversalCopy<uint16_t>, OutputType>{},
                       ThreadLayoutrO{}, ValueLayoutrO{}));
 
-    using TiledCopyShaperO = Shape<_8, Int<kBlockM/8>, _16, Int<kHeadDim/16>>;
+    using TiledCopyShaperO = Shape<_8, Int<kBlockM/8>, _16, Int<kHeadDimV/16>>;
     using SmemLayoutrO = decltype(composition(SmemLayoutO{}, Layout<TiledCopyShaperO>{}));
 
     using SmemCopyAtomQ = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
