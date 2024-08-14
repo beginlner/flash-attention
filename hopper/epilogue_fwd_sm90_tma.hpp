@@ -25,7 +25,7 @@ struct CollectiveEpilogueFwd {
     static constexpr int kBlockM = Ktraits::kBlockM;
     static constexpr int kBlockN = Ktraits::kBlockN;
     static constexpr int kBlockH = Ktraits::kBlockH;
-    static constexpr int kHeadDim = Ktraits::kHeadDim;
+    static constexpr int kHeadDim = Ktraits::kHeadDimV;
     using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;    
 
     static constexpr int kNWarps = Ktraits::kNWarps;
