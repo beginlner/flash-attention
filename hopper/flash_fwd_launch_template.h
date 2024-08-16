@@ -150,7 +150,7 @@ void run_mha_fwd_hdim192(Flash_fwd_params &params, cudaStream_t stream) {
             // Only use Cluster if number of tiles along seqlen_q is even and not Is_causal
             BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 128) % 2 == 0 && !Is_causal && !Seqlen_traits::kUseVarSeqLen, UseCluster, [&] {
                 run_flash_fwd<
-                    Flash_fwd_kernel_traits<Headdim, 128, 80, 12, 2, false, UseCluster ? 2 : 1, T, HeaddimV>, 
+                    Flash_fwd_kernel_traits<Headdim, 128, 128, 12, 2, false, UseCluster ? 2 : 1, T, HeaddimV>, 
                     Is_causal, Seqlen_traits
                 >(params, stream);
             });
