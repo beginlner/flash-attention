@@ -84,12 +84,13 @@ public:
 
     using ShapedQ = cute::Shape<int32_t, int32_t, int32_t, int32_t>;   // (seqlen_q, d, head, batch)
     using StridedQ = cute::Stride<int64_t, _1, int64_t, int64_t>;
+    using TileShape_dQaccum = decltype(make_shape(size<0>(SmemLayoutdQaccumTMA{}), size<1>(SmemLayoutdQaccumTMA{})));
 
     using TMA_dQaccum = decltype(make_tma_copy(
         GmemTiledCopydQaccum{},
         make_tensor(make_gmem_ptr(static_cast<ElementAccum*>(nullptr)), ShapedQ{}, StridedQ{}),
         SmemLayoutdQaccumTMA{},
-        SmemLayoutdQaccumTMA{}.shape(),
+        TileShape_dQaccum{},
         _1{})); // no mcast for dQ
 
     // Device side arguments
@@ -126,7 +127,7 @@ public:
             GmemTiledCopydQaccum{},
             mdQaccum,
             SmemLayoutdQaccumTMA{},
-            SmemLayoutdQaccumTMA{}.shape(),
+            TileShape_dQaccum{},
             _1{}); // no mcast for dQaccum
         return {
             tma_load_dQaccum,
@@ -172,10 +173,10 @@ public:
         __syncthreads();
 
         // Step 1: TMA to load dQaccum from gmem to smem
-        // We reshaped dQaccum to have last dimension 32, so the offset needs to be multiplied by kHeadDim / 32
-        int const offset_padded = !is_varlen ? 0 : ((params.cu_seqlens[bidb] + bidb * 128) / 128 * 128) * (kHeadDim / get<1>(SmemLayoutdQaccumTMA{}.shape()));
+        // We reshaped dQaccum to have last dimension ElemsPerRowTMA, so the offset needs to be multiplied by kHeadDim / ElemsPerRowTMA
+        int const offset_padded = !is_varlen ? 0 : ((params.cu_seqlens[bidb] + bidb * 128) / 128 * 128) * (kHeadDim / get<1>(TileShape_dQaccum{}));
         Tensor mdQaccum = params.tma_load_dQaccum.get_tma_tensor(params.shape_dQaccum)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gdQaccum = local_tile(domain_offset(make_coord(offset_padded, _0{}), mdQaccum), SmemLayoutdQaccumTMA{}.shape(), make_coord(m_block, _0{}));  // (M, K)
+        Tensor gdQaccum = local_tile(domain_offset(make_coord(offset_padded, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(m_block, _0{}));  // (M, K)
         auto block_tma_dQ = params.tma_load_dQaccum.get_slice(_0{});
         Tensor tdQgdQaccumTMA = block_tma_dQ.partition_D(gdQaccum);  // (TMA, TMA_M, TMA_K)
         Tensor tdQsdQaccumTMA = block_tma_dQ.partition_S(sdQaccumTMA); // (TMA, TMA_M, TMA_K)

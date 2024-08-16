@@ -21,16 +21,18 @@
 using namespace cute;
 
 template <int kHeadDim, int kBlockM, int kBlockN, typename Element, bool Is_causal, bool Is_local, bool Varlen, bool Deterministic,
-          bool dKV_swapAB, bool dQ_swapAB, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1>
+          bool dKV_swapAB, bool dQ_swapAB, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1, int kHeadDimV_=0>
 void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Is_causal and Is_local cannot be true at the same time.");
     using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
+    static constexpr int kHeadDimV = kHeadDimV_ > 0 ? kHeadDimV_ : kHeadDim;
+    using TileShapeV_MK = cute::Shape<Int<kBlockM>, Int<kHeadDimV>>;
     using ElementAccum = float;
-    using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, Element, ElementAccum, cutlass::arch::Sm90, /*Clear_dQaccum=*/true, Varlen>;
+    using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, TileShapeV_MK, Element, ElementAccum, cutlass::arch::Sm90, /*Clear_dQaccum=*/true, Varlen>;
     int const total_q_padded_rounded = cute::round_up(params.total_q + params.b * 128, 128);
     typename PreprocessKernel::Arguments preprocess_args {
         static_cast<Element const*>(params.o_ptr),
-        {!Varlen ? params.seqlen_q : params.total_q, params.d, params.h, !Varlen ? params.b : 1},  // shape_O
+        {!Varlen ? params.seqlen_q : params.total_q, params.d_v, params.h, !Varlen ? params.b : 1},  // shape_O
         {params.o_row_stride, _1{}, params.o_head_stride, !Varlen ? params.o_batch_stride : 0},  // stride_O
         static_cast<Element const*>(params.do_ptr),
         {params.do_row_stride, _1{}, params.do_head_stride, !Varlen ? params.do_batch_stride : 0},  // stride_dO
@@ -55,12 +57,13 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     cutlass::device_kernel<PreprocessKernel><<<grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream>>>(preprocess_params);
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+    using TileShapeV_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimV>>;
     using ClusterShape = cute::Shape<_1, Int<1>, _1>;
-    static constexpr int Stages = 2;
-    using CollectiveMainloop = flash::CollectiveMainloopBwd<Stages, ClusterShape, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm90,
+    static constexpr int Stages = kHeadDim == 192 ? 1 : 2;
+    using CollectiveMainloop = flash::CollectiveMainloopBwd<Stages, ClusterShape, TileShape_MNK, TileShapeV_MNK, Element, ElementAccum, cutlass::arch::Sm90,
             Is_causal, Is_local, Varlen, Deterministic,
             dKV_swapAB, dQ_swapAB, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ>;
-    using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, Element, CollectiveMainloop::NumMmaThreads, Varlen>;
+    using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, TileShapeV_MNK, Element, CollectiveMainloop::NumMmaThreads, Varlen>;
     using Scheduler = flash::SingleTileSchedulerBwd;
     using AttnKernel = flash::FlashAttnBwd<CollectiveMainloop, CollectiveEpilogue, Scheduler>;
 
@@ -72,14 +75,16 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         {!Varlen ? params.seqlen_k : params.total_k, params.d, params.h_k, !Varlen ? params.b : 1},  // shape_K
         {params.k_row_stride, _1{}, params.k_head_stride, !Varlen ? params.k_batch_stride : 0},  // stride_K
         static_cast<Element const*>(params.v_ptr),
+        {!Varlen ? params.seqlen_k : params.total_k, params.d_v, params.h_k, !Varlen ? params.b : 1},  // shape_V
         {params.v_row_stride, _1{}, params.v_head_stride, !Varlen ? params.v_batch_stride : 0},  // stride_V
         static_cast<Element const*>(params.do_ptr),
+        {!Varlen ? params.seqlen_q : params.total_q, params.d_v, params.h, !Varlen ? params.b : 1},  // shape_dO
         {params.do_row_stride, _1{}, params.do_head_stride, !Varlen ? params.do_batch_stride : 0},  // stride_dO
         static_cast<ElementAccum*>(params.dq_accum_ptr),
         // {params.seqlen_q_rounded, params.d_rounded, params.h, params.b},  // shape_dQaccum
         // {params.d_rounded, _1{}, params.d_rounded * params.seqlen_q_rounded, params.d_rounded * params.seqlen_q_rounded * params.h}, // stride_dQaccum
-        {(!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded) * (params.d_rounded / 32), 32, params.h, !Varlen ? params.b : 1},  // shape_dQaccum
-        {32, _1{}, params.d_rounded * (!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded), !Varlen ? params.d_rounded * params.seqlen_q_rounded * params.h : 0}, // stride_dQaccum
+        {(!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded) * (params.d_rounded / CollectiveMainloop::ElemsPerRowTMA), CollectiveMainloop::ElemsPerRowTMA, params.h, !Varlen ? params.b : 1},  // shape_dQaccum
+        {CollectiveMainloop::ElemsPerRowTMA, _1{}, params.d_rounded * (!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded), !Varlen ? params.d_rounded * params.seqlen_q_rounded * params.h : 0}, // stride_dQaccum
         static_cast<float*>(params.softmax_lse_log2_ptr),
         {!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded, params.h, !Varlen ? params.b : 1},  // shape_LSE
         {_1{}, !Varlen ? params.seqlen_q_rounded : total_q_padded_rounded, !Varlen ? params.h * params.seqlen_q_rounded : 0},  // stride_LSE_log2
@@ -97,7 +102,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         {!Varlen ? params.seqlen_k : params.total_k, params.d, params.h, !Varlen ? params.b : 1},  // shape_dK
         {params.dk_row_stride, _1{}, params.dk_head_stride, !Varlen ? params.dk_batch_stride : 0},  // stride_dK
         static_cast<Element*>(params.dv_ptr),
-        {params.dv_row_stride, _1{}, params.dv_head_stride, !Varlen ? params.dv_batch_stride : 0},
+        {!Varlen ? params.seqlen_k : params.total_k, params.d_v, params.h, !Varlen ? params.b : 1},  // shape_dV
+        {params.dv_row_stride, _1{}, params.dv_head_stride, !Varlen ? params.dv_batch_stride : 0},  // stride_dV
         params.cu_seqlens_k
     };
 
@@ -144,8 +150,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         static_cast<ElementAccum const*>(params.dq_accum_ptr),
         // {params.seqlen_q_rounded, params.d_rounded, params.h, params.b},  // shape_dQaccum
         // {params.d_rounded, _1{}, params.d_rounded * params.seqlen_q_rounded, params.d_rounded * params.seqlen_q_rounded * params.h},  // stride_dQaccum
-        {(!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded) * (params.d_rounded / 32), 32, params.h, !Varlen ? params.b : 1},  // shape_dQaccum
-        {32, _1{}, params.d_rounded * (!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded), !Varlen ? params.d_rounded * params.seqlen_q_rounded * params.h : 0}, // stride_dQaccum
+        {(!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded) * (params.d_rounded / CollectiveMainloop::ElemsPerRowTMA), CollectiveMainloop::ElemsPerRowTMA, params.h, !Varlen ? params.b : 1},  // shape_dQaccum
+        {CollectiveMainloop::ElemsPerRowTMA, _1{}, params.d_rounded * (!Varlen ? params.seqlen_q_rounded : total_q_padded_rounded), !Varlen ? params.d_rounded * params.seqlen_q_rounded * params.h : 0}, // stride_dQaccum
         static_cast<Element*>(params.dq_ptr),
         {!Varlen ? params.seqlen_q : params.total_q, params.d, params.h, !Varlen ? params.b : 1},  // shape_dQ
         {params.dq_row_stride, _1{}, params.dq_head_stride, params.dq_batch_stride},  // stride_dQ
@@ -205,6 +211,20 @@ void run_mha_bwd_hdim128(Flash_bwd_params &params, cudaStream_t stream) {
                 BOOL_SWITCH(params.deterministic, Deterministic, [&] {
                     run_flash_bwd<Headdim, 64, 128, T, Is_causal, Is_local && !Is_causal, Varlen, Deterministic, false, false, 1, 2, 1>(params, stream);
                 });
+            });
+        });
+    });
+}
+
+template<typename T>
+void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
+    constexpr static int Headdim = 192;
+    FLASH_ASSERT(params.d_v == 128);
+    constexpr static int HeaddimV = 128;
+    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        BOOL_SWITCH(params.cu_seqlens_q != nullptr || params.cu_seqlens_k != nullptr, Varlen, [&] {
+            BOOL_SWITCH(params.deterministic, Deterministic, [&] {
+                run_flash_bwd<Headdim, 64, 128, T, Is_causal, Varlen, Deterministic, false, false, 1, 2, 1, HeaddimV>(params, stream);
             });
         });
     });
