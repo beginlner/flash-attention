@@ -37,8 +37,10 @@ public:
     // Mainloop derived types
     using CollectiveMainloop = CollectiveMainloop_;
     using TileShape_MNK = typename CollectiveMainloop::TileShape_MNK;
-    using TiledMmaSdP = typename CollectiveMainloop::TiledMmaSdP;
-    using TiledMmadKV = typename CollectiveMainloop::TiledMmadKV;
+    using TileShapeV_MNK = typename CollectiveMainloop::TileShapeV_MNK;
+    using TiledMmaS = typename CollectiveMainloop::TiledMmaS;
+    using TiledMmadK = typename CollectiveMainloop::TiledMmadK;
+    using TiledMmadV = typename CollectiveMainloop::TiledMmadV;
     using ArchTag = typename CollectiveMainloop::ArchTag;
     using ClusterShape = typename CollectiveMainloop::ClusterShape;
     using MainloopArguments = typename CollectiveMainloop::Arguments;
@@ -57,8 +59,8 @@ public:
     using TileSchedulerParams = typename TileScheduler::Params;
 
     static constexpr uint32_t NumLoadWarpGroups = 1;
-    static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaSdP{})) / cutlass::NumThreadsPerWarpGroup;
-    static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaSdP{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
+    static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaS{})) / cutlass::NumThreadsPerWarpGroup;
+    static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaS{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
     static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
     static_assert(NumMmaWarpGroups == 2);
 
@@ -189,6 +191,7 @@ public:
         }
         // We're counting on pipeline_q to call cutlass::arch::fence_barrier_init();
         MainloopPipeline pipeline_q(shared_storage.pipeline_q, pipeline_params, ClusterShape{});
+        pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytesdO + CollectiveMainloop::TmaTransactionBytesLSE;
         MainloopPipeline pipeline_do(shared_storage.pipeline_do, pipeline_params, ClusterShape{});
 
         CollectiveMainloop collective_mainloop;
@@ -262,7 +265,8 @@ public:
 
             TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.smem_scheduler));
             // Initialize matmul objects.
-            TiledMmadKV tiled_mma_dKV;
+            TiledMmadK tiled_mma_dK;
+            TiledMmadV tiled_mma_dV;
 
             PipelineState smem_pipe_read;
 
@@ -289,11 +293,11 @@ public:
                 }
 
                 // dK and dV output accumulator.
-                Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShape_MNK{}));
-                Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShape_MNK{}));
+                Tensor tdKrdK = partition_fragment_C(tiled_mma_dK, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShape_MNK{}));
+                Tensor tdVrdV = partition_fragment_C(tiled_mma_dV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShapeV_MNK{}));
                 collective_mainloop.mma(params.mainloop, pipeline_q, pipeline_do, smem_pipe_read,
                                         tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage);
-                collective_epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
+                collective_epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dK, tiled_mma_dV,
                                           threadIdx.x - NumCopyThreads, block_coord);
 
                 ++work_idx;

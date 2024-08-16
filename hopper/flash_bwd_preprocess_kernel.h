@@ -17,13 +17,14 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen>
+template <class TileShape_MK_, class TileShapeV_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen>
 class FlashAttnBwdPreprocess {
 
 public:
 
     // Type Aliases
     using TileShape_MK = TileShape_MK_;
+    using TileShapeV_MK = TileShapeV_MK_;
     using ArchTag = ArchTag_;
 
     static_assert(std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
@@ -35,12 +36,12 @@ public:
     static constexpr int SharedStorageSize = 0;
 
     static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
-    static_assert(get<1>(TileShape_MK{}) % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
-    static constexpr int kHeadDim = get<1>(TileShape_MK{});
-    // We want kBlockKGmem to be a power of 2 so that when we do the summing,
+    static constexpr int kHeadDimV = get<1>(TileShapeV_MK{});
+    static_assert(kHeadDimV % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
+    // We want kBlockKGmemO to be a power of 2 so that when we do the summing,
     // it's just between threads in the same warp
-    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
-    static constexpr int kGmemThreadsPerRow = kBlockKGmem / kGmemElemsPerLoad;
+    static constexpr int kBlockKGmemO = kHeadDimV % 128 == 0 ? 128 : (kHeadDimV % 64 == 0 ? 64 : 32);
+    static constexpr int kGmemThreadsPerRow = kBlockKGmemO / kGmemElemsPerLoad;
     static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0, "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
     using GmemLayoutAtom = Layout<Shape <Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
                                   Stride<Int<kGmemThreadsPerRow>, _1>>;
@@ -50,8 +51,12 @@ public:
                         Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{}));  // Val layout, 8 or 16 vals per load
 
     static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
-    static_assert(get<1>(TileShape_MK{}) % kGmemElemsPerLoadAccum == 0, "Headdim must be a multiple of kGmemElemsPerLoadAccum");
-    static constexpr int kGmemThreadsPerRowAccum = kBlockKGmem / kGmemElemsPerLoadAccum;
+    static constexpr int kHeadDim = get<1>(TileShape_MK{});
+    static_assert(kHeadDim % kGmemElemsPerLoadAccum == 0, "Headdim must be a multiple of kGmemElemsPerLoadAccum");
+    // We want kBlockKGmemQ to be a power of 2 so that when we do the summing,
+    // it's just between threads in the same warp
+    static constexpr int kBlockKGmemQ = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
+    static constexpr int kGmemThreadsPerRowAccum = kBlockKGmemQ / kGmemElemsPerLoadAccum;
     static_assert(MaxThreadsPerBlock % kGmemThreadsPerRowAccum == 0, "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRowAccum");
     using GmemLayoutAtomAccum = Layout<Shape <Int<MaxThreadsPerBlock / kGmemThreadsPerRowAccum>, Int<kGmemThreadsPerRowAccum>>,
                                        Stride<Int<kGmemThreadsPerRowAccum>, _1>>;
@@ -152,9 +157,9 @@ public:
         if (is_varlen && m_block * kBlockM >= seqlen_o) { return; }
 
         Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), TileShapeV_MK{}, make_coord(m_block, _0{}));  // (M, K)
         Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gdO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        Tensor gdO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mdO), TileShapeV_MK{}, make_coord(m_block, _0{}));  // (M, K)
 
         auto shape_LSE = select<0, 2, 3>(params.shape_O);
         Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), shape_LSE, params.stride_LSE)(_, bidh, !is_varlen ? bidb : 0);
@@ -168,14 +173,14 @@ public:
         Tensor tOgO = gmem_thr_copy_O.partition_S(gO);
         Tensor tOgdO = gmem_thr_copy_O.partition_S(gdO);
         // Construct identity layout for gO
-        Tensor cO = cute::make_identity_tensor(TileShape_MK{});  // (BLK_M,BLK_K) -> (blk_m,blk_k)
+        Tensor cO = cute::make_identity_tensor(TileShapeV_MK{});  // (BLK_M,BLK_K) -> (blk_m,blk_k)
         // Repeat the partitioning with identity layouts
         Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
         Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));
         #pragma unroll
         for (int k = 0; k < size(tOpO); ++k) { tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O); }
 
-        // (8, kBlockM / 32, kHeadDim / 64) or (8, kBlockM / 16, kHeadDim / 128)
+        // (8, kBlockM / 32, kHeadDimV / 64) or (8, kBlockM / 16, kHeadDimV / 128)
         Tensor tOrO = make_fragment_like(tOgO);
         Tensor tOrdO = make_fragment_like(tOgdO);
         flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true>(
@@ -185,7 +190,7 @@ public:
             gmem_tiled_copy_O, tOgdO, tOrdO, tOcO, tOpO, seqlen_o - m_block * kBlockM
         );
 
-        // Reshape from e.g. (8, kBlockM / 32, kHeadDim / 64) to (kBlockM / 32, (8, kHeadDim / 64))
+        // Reshape from e.g. (8, kBlockM / 32, kHeadDimV / 64) to (kBlockM / 32, (8, kHeadDimV / 64))
         Layout l = make_layout(get<1>(tOrO.layout()), make_layout(get<0>(tOrO.layout()), get<2>(tOrO.layout())));
         Tensor o_fp32 = flash::convert_type<float>(make_tensor(tOrO.data(), l));
         Tensor do_fp32 = flash::convert_type<float>(make_tensor(tOrdO.data(), l));
