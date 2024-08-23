@@ -223,6 +223,69 @@ def _flash_attn_varlen_backward(
     return dq, dk, dv, softmax_d
 
 
+def _flash_attn_varlen_backward_odo(
+    dout,
+    q,
+    k,
+    v,
+    outdout,
+    softmax_lse,
+    dq,
+    dk,
+    dv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    dropout_p,
+    softmax_scale,
+    causal,
+    window_size,
+    alibi_slopes,
+    deterministic,
+    rng_state=None,
+    descale_dout=None,
+    descale_q=None,
+    descale_k=None,
+    descale_v=None,
+):
+    maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+    # dq, dk, dv are allocated by us so they should already be contiguous
+    dout, q, k, v, outdout = [maybe_contiguous(x) for x in (dout, q, k, v, outdout)]
+    dq, dk, dv, softmax_d, = flash_attn_cuda.varlen_bwd_odo(
+        dout,
+        q,
+        k,
+        v,
+        descale_dout,
+        descale_q,
+        descale_k,
+        descale_v,
+        outdout,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        alibi_slopes,
+        max_seqlen_q,
+        max_seqlen_k,
+        dropout_p,
+        softmax_scale,
+        False,
+        causal,
+        window_size[0],
+        window_size[1],
+        deterministic,
+        None,
+        rng_state,
+    )
+    # if dk.isnan().any() or dk.isnan().any() or dv.isnan().any() or softmax_d.isnan().any():
+    #     breakpoint()
+    return dq, dk, dv, softmax_d
+
+
 class FlashAttnQKVPackedFunc(torch.autograd.Function):
     @staticmethod
     def forward(
