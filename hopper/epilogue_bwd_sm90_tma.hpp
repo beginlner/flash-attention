@@ -16,7 +16,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MNK_, class TileShapeV_MNK_, class Element_, int NumEpilogueThreads_, bool Varlen_>
+template <class TileShape_MNK_, class TileShapeV_MNK_, int AtomLayoutNdKV, class Element_, int NumEpilogueThreads_, bool Varlen_>
 struct CollectiveEpilogueBwd {
 
     using TileShape_MNK = TileShape_MNK_;
@@ -50,21 +50,23 @@ struct CollectiveEpilogueBwd {
                         GmemLayoutAtomdV{},
                         Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{}));  // Val layout, 8 or 16 vals per store
 
+    static constexpr int MmadKShapeN = get<2>(TileShape_MNK{}) / (2 / AtomLayoutNdKV);
+    static constexpr int MmadVShapeN = get<2>(TileShapeV_MNK{}) / (2 / AtomLayoutNdKV);
     using SmemLayoutAtomdKTMA = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
-        decltype(cute::get<1>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
+        decltype(cute::get<1>(TileShape_MNK{})), Int<MmadKShapeN>>());
     using SmemLayoutAtomdVTMA = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
-        decltype(cute::get<1>(TileShapeV_MNK{})), decltype(cute::get<2>(TileShapeV_MNK{}))>());
+        decltype(cute::get<1>(TileShapeV_MNK{})), Int<MmadVShapeN>>());
     using SmemLayoutdKTMA = decltype(tile_to_shape(SmemLayoutAtomdKTMA{}, select<1, 2>(TileShape_MNK{})));
     using SmemLayoutdVTMA = decltype(tile_to_shape(SmemLayoutAtomdVTMA{}, select<1, 2>(TileShapeV_MNK{})));
 
     // If we don't use TMA
-    static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : (kHeadDim % 32 == 0 ? 32 : 16);
+    static constexpr int kBlockKSmem = MmadKShapeN % 64 == 0 ? 64 : (MmadKShapeN % 32 == 0 ? 32 : 16);
     static constexpr int kSwizzle = kBlockKSmem == 64 ? 3 : (kBlockKSmem == 32 ? 2 : 1);
     using SmemLayoutAtomdKSTG =
         decltype(composition(Swizzle<kSwizzle, 3, 3>{},
                              Layout<Shape<Int<8>, Int<kBlockKSmem>>,
                              Stride<Int<kBlockKSmem>, _1>>{}));
-    static constexpr int kBlockKSmemV = kHeadDimV % 64 == 0 ? 64 : (kHeadDimV % 32 == 0 ? 32 : 16);
+    static constexpr int kBlockKSmemV = MmadVShapeN % 64 == 0 ? 64 : (MmadVShapeN % 32 == 0 ? 32 : 16);
     static constexpr int kSwizzleV = kBlockKSmemV == 64 ? 3 : (kBlockKSmemV == 32 ? 2 : 1);
     using SmemLayoutAtomdVSTG =
         decltype(composition(Swizzle<kSwizzleV, 3, 3>{},
