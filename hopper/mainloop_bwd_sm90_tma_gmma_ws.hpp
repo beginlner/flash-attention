@@ -58,13 +58,13 @@ struct CollectiveMainloopBwd {
     static constexpr bool Mma_dQ_is_RS = AtomLayoutMSdP == 2 && AtomLayoutMdQ == 2 && !SdP_swapAB && !dQ_swapAB;  // If dQ_swapAB we can't use RS
     using TileShapeAtomS = std::conditional_t<
         !SdP_swapAB,
-        Shape<Int<kBlockM>, Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kHeadDim>>,
-        Shape<Int<kBlockN>, Int<kBlockM / AtomLayoutMSdP>, Int<kHeadDim>>
+        Shape<Int<kBlockM / AtomLayoutMSdP>, Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kHeadDim>>,
+        Shape<Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kBlockM / AtomLayoutMSdP>, Int<kHeadDim>>
     >;
     using TileShapeAtomdP = std::conditional_t<
         !SdP_swapAB,
-        Shape<Int<kBlockM>, Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kHeadDimV>>,
-        Shape<Int<kBlockN>, Int<kBlockM / AtomLayoutMSdP>, Int<kHeadDimV>>
+        Shape<Int<kBlockM / AtomLayoutMSdP>, Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kHeadDimV>>,
+        Shape<Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kBlockM / AtomLayoutMSdP>, Int<kHeadDimV>>
     >;
     using AtomLayoutSdP = std::conditional_t<
         !SdP_swapAB,
@@ -80,13 +80,13 @@ struct CollectiveMainloopBwd {
 
     using TileShapeAtomdK = std::conditional_t<
         !dKV_swapAB,
-        Shape<Int<kBlockN>, Int<kHeadDim / (2 / AtomLayoutNdKV)>, Int<kBlockM>>,
-        Shape<Int<kHeadDim>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>
+        Shape<Int<kBlockN / AtomLayoutNdKV>, Int<kHeadDim / (2 / AtomLayoutNdKV)>, Int<kBlockM>>,
+        Shape<Int<kHeadDim / (2 / AtomLayoutNdKV)>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>
     >;
     using TileShapeAtomdV = std::conditional_t<
         !dKV_swapAB,
-        Shape<Int<kBlockN>, Int<kHeadDimV / (2 / AtomLayoutNdKV)>, Int<kBlockM>>,
-        Shape<Int<kHeadDimV>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>
+        Shape<Int<kBlockN / AtomLayoutNdKV>, Int<kHeadDimV / (2 / AtomLayoutNdKV)>, Int<kBlockM>>,
+        Shape<Int<kHeadDimV / (2 / AtomLayoutNdKV)>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>
     >;
     using AtomLayoutdKV = std::conditional_t<
         !dKV_swapAB,
@@ -110,8 +110,8 @@ struct CollectiveMainloopBwd {
 
     using TileShapeAtomdQ = std::conditional_t<
         !dQ_swapAB,
-        Shape<Int<kBlockM>, Int<kHeadDim / (NumdQWarpGroups / AtomLayoutMdQ)>, Int<kBlockN>>,
-        Shape<Int<kHeadDim>, Int<kBlockM / AtomLayoutMdQ>, Int<kBlockN>>
+        Shape<Int<kBlockM / AtomLayoutMdQ>, Int<kHeadDim / (NumdQWarpGroups / AtomLayoutMdQ)>, Int<kBlockN>>,
+        Shape<Int<kHeadDim / (NumdQWarpGroups / AtomLayoutMdQ)>, Int<kBlockM / AtomLayoutMdQ>, Int<kBlockN>>
     >;
     using AtomLayoutdQ = std::conditional_t<
         !dQ_swapAB,

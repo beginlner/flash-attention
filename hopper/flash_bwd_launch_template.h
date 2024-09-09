@@ -63,7 +63,7 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     using CollectiveMainloop = flash::CollectiveMainloopBwd<Stages, ClusterShape, TileShape_MNK, TileShapeV_MNK, Element, ElementAccum, cutlass::arch::Sm90,
             Is_causal, Is_local, Varlen, Deterministic,
             dKV_swapAB, dQ_swapAB, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ>;
-    using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, TileShapeV_MNK, Element, CollectiveMainloop::NumMmaThreads, Varlen>;
+    using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, TileShapeV_MNK, AtomLayoutNdKV, Element, CollectiveMainloop::NumMmaThreads, Varlen>;
     using Scheduler = flash::SingleTileSchedulerBwd;
     using AttnKernel = flash::FlashAttnBwd<CollectiveMainloop, CollectiveEpilogue, Scheduler>;
 
