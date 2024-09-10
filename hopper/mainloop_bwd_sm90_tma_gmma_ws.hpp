@@ -157,7 +157,7 @@ struct CollectiveMainloopBwd {
     using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{})));
     using SmemLayoutAtomdS = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
         decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>());
-    using SmemLayoutdS = decltype(tile_to_shape(SmemLayoutAtomdS{}, make_shape(Int<kBlockM>{}, Int<kBlockN>{}, Int<kStages>{})));
+    using SmemLayoutdS = decltype(tile_to_shape(SmemLayoutAtomdS{}, make_shape(Int<kBlockM>{}, Int<kBlockN>{})));
 
     // Need stride to be multiple of 32, otherwise we get error (misaligned address) when doing TMA if e.g. kBlockM=80
     using SmemLayoutLSE = cute::Layout<cute::Shape<Int<kBlockM>, Int<kStages>>, cute::Stride<_1, Int<cute::round_up(kBlockM, 32)>>>;
@@ -182,8 +182,8 @@ struct CollectiveMainloopBwd {
                                                make_stride(Int<kBlockM>{}, _1{}))));
     using SmemLayoutdSt =
         decltype(cute::composition(SmemLayoutdS{},
-                                   make_layout(make_shape(Int<kBlockN>{}, Int<kBlockM>{}, Int<kStages>{}),
-                                               make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kBlockN>{}))));
+                                   make_layout(make_shape(Int<kBlockN>{}, Int<kBlockM>{}),
+                                               make_stride(Int<kBlockM>{}, _1{}))));
 
     // Thread layout, 256 threads per row
     using R2SLayoutAtomdQaccum = Layout<Shape<Int<kNThreadsdQ>>, Stride<_1>>;
@@ -785,11 +785,11 @@ struct CollectiveMainloopBwd {
             if constexpr (!dQ_swapAB) {
                 Tensor tdQrdS = wg_mma_dQ.partition_fragment_A(sdS);
                 Tensor tdQrK = wg_mma_dQ.partition_fragment_B(sKt);
-                flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dQ, tdQrdS(_, _, _, smem_pipe_read.index()), tdQrK, tdQrdQ);
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dQ, tdQrdS, tdQrK, tdQrdQ);
             } else {
                 Tensor tdQrdS = wg_mma_dQ.partition_fragment_B(sdS);
                 Tensor tdQrK = wg_mma_dQ.partition_fragment_A(sKt);
-                flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dQ, tdQrK, tdQrdS(_, _, _, smem_pipe_read.index()), tdQrdQ);
+                flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dQ, tdQrK, tdQrdS, tdQrdQ);
             }
             pipeline_q.consumer_release(smem_pipe_read);  // release Q
             warpgroup_wait<0>();
@@ -849,7 +849,7 @@ struct CollectiveMainloopBwd {
                 // But because both WGs have to sync at the end of the loop and double buffering, this race condition
                 // is not possible.
                 Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS);     // ((Atom,AtomNum), MMA_N, MMA_N)
-                cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, smem_pipe_read.index()));
+                cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
 
                 Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadV>(tSrS.layout()));
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dV, tdVrP, tdVrdO(_, _, _, smem_pipe_read.index()), tdVrdV);
@@ -919,7 +919,7 @@ struct CollectiveMainloopBwd {
             Tensor rdS = flash::convert_type<Element>(tdPrdP);
 
             Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS);     // ((Atom,AtomNum), MMA_N, MMA_N)
-            cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, smem_pipe_read.index()));
+            cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
 
             Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadV>(tSrS.layout()));
             flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dV, tdVrP, tdVrdO(_, _, _, smem_pipe_read.index()), tdVrdV);
