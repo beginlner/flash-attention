@@ -57,7 +57,7 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using TileShapeV_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimV>>;
     using ClusterShape = cute::Shape<_1, Int<1>, _1>;
-    static constexpr int Stages = kHeadDim == 192 ? 1 : 2;
+    static constexpr int Stages = 2;
     using CollectiveMainloop = flash::CollectiveMainloopBwd<Stages, ClusterShape, TileShape_MNK, TileShapeV_MNK, Element, ElementAccum, cutlass::arch::Sm90,
             Is_causal, Varlen, Deterministic,
             dKV_swapAB, dQ_swapAB, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ>;
