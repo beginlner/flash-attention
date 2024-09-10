@@ -42,11 +42,11 @@ def assert_close(x, y, name=""):
     assert diff[0] < 1e-2
 
 
-def timer(func):
+def timer(func, name):
     t = triton.testing.do_bench(func, fast_flush=False)
     FLOPS = b * h * (d + v_dim) * ((s_k * s_k - max(s_k - s_q, 0) * max(s_k - s_q, 0)) if causal else s_q * s_k * 2) * (3.5 if has_bwd else 1)
     BYTES = b * s_k * h_k * (d + v_dim) * (torch.finfo(dtype).bits / 8)
-    print(f"{t} ms, {FLOPS / 10 ** 9 / t} TFLOP/s, {BYTES / 10 ** 6 / t} GB/s")
+    print(f"{t} ms, {FLOPS / 10 ** 9 / t} TFLOP/s, {BYTES / 10 ** 6 / t} GB/s, name: {name}")
     return t
 
 
@@ -85,11 +85,16 @@ def test_flash_attention():
     k2 = k.clone().requires_grad_()
     v2 = v.clone().requires_grad_()
 
-    def flash_attn():
+    def flash_attn(provider="FA3"):
         q1.grad = k1.grad = v1.grad = None
-        return flash_attn_func_hopper(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), causal=causal)[0].flatten(0, 1)
-        # return flash_attn_varlen_func_hopper(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, causal=causal)[0]
-        # return flash_attn_varlen_func(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, causal=causal)
+        if provider == "FA3":
+            return flash_attn_func_hopper(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), causal=causal)[0].flatten(0, 1)
+        elif provider == "FA3 varlen":
+            return flash_attn_varlen_func_hopper(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, causal=causal)[0]
+        elif provider == "FA2":
+            return flash_attn_varlen_func(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, causal=causal)
+        else:
+            raise ValueError
 
     def torch_attn():
         q2.grad = k2.grad = v2.grad = None
@@ -100,11 +105,13 @@ def test_flash_attention():
             is_causal=causal,
         ).to(dtype).transpose(1, 2).flatten(0, 1)
 
-    def fn():
-        flash_attn().backward(grad_out) if has_bwd else flash_attn()
+    def fn(provider="FA3"):
+        flash_attn(provider).backward(grad_out) if has_bwd else flash_attn(provider)
 
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
-        fn()
+        fn("FA3")
+        fn("FA3 varlen")
+        fn("FA2")
     print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
 
     out_flash_attn = flash_attn()
@@ -118,8 +125,12 @@ def test_flash_attention():
         assert_close(k1.grad, k2.grad, "dk")
         assert_close(v1.grad, v2.grad, "dv")
 
-    timer(fn)
-    timer(fn)
+    timer(lambda: fn("FA3"), "FA3")
+    timer(lambda: fn("FA3 varlen"), "FA3 varlen")
+    timer(lambda: fn("FA2"), "FA2")
+    timer(lambda: fn("FA3"), "FA3")
+    timer(lambda: fn("FA3 varlen"), "FA3 varlen")
+    timer(lambda: fn("FA2"), "FA2")
 
 
 if __name__ == "__main__":
