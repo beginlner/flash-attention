@@ -247,7 +247,12 @@ def get_package_version():
     with open(Path(this_dir) / "__init__.py", "r") as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     public_version = ast.literal_eval(version_match.group(1))
-    local_version = os.environ.get("FLASHATTN_HOPPER_LOCAL_VERSION")
+    try:
+        cmd = ['git', 'rev-parse', '--short', 'HEAD']
+        local_version = subprocess.check_output(cmd).decode('ascii').rstrip()
+    except:
+        local_version = ''
+    # local_version = os.environ.get("FLASHATTN_HOPPER_LOCAL_VERSION")
     if local_version:
         return f"{public_version}+{local_version}"
     else:
