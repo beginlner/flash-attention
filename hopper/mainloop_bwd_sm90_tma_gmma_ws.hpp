@@ -690,22 +690,21 @@ struct CollectiveMainloopBwd {
         auto wg_mma_dQ = tiled_mma_dQ.get_slice(!Varlen ? warp_group_thread_layout_dq(NumdQWarpGroups == 2 ? warp_group_idx : 0) : thread_idx);
         // auto wg_mma_dQ = tiled_mma_dQ.get_thread_slice(thread_idx);
 
-        auto smem_tiled_copy_PdS = make_tiled_copy_C(SmemCopyAtomPdS{}, tiled_mma_S);
-        auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(thread_idx);
-        Tensor tdSsdS = smem_thr_copy_PdS.partition_D(sdSt);      // ((Atom,AtomNum),PIPE_M,PIPE_N)
-
         R2STiledCopydQaccum r2s_tiled_copy_dQaccum;
         // auto r2s_thr_copy_dQaccum = r2s_tiled_copy_dQaccum.get_thread_slice(thread_idx);
         auto r2s_thr_copy_dQaccum = r2s_tiled_copy_dQaccum.get_thread_slice(NumdQWarpGroups == 2 ? thread_idx : thread_idx % cutlass::NumThreadsPerWarpGroup);
         Tensor tdQsdQaccum = r2s_thr_copy_dQaccum.partition_D(sdQ);
 
         // Allocate "fragments/descriptors"
-        Tensor tSrQ = wg_mma_S.partition_fragment_B(sQ);
+        Tensor tSrQ = wg_mma_S.partition_fragment_B(sQ)(_, _, _, _0{});
         Tensor tSrK = wg_mma_S.partition_fragment_A(sK);
-        Tensor tdPrdO = wg_mma_dP.partition_fragment_B(sdO);
+        Tensor tdPrdO = wg_mma_dP.partition_fragment_B(sdO)(_, _, _, _0{});
         Tensor tdPrV = wg_mma_dP.partition_fragment_A(sV);
-        Tensor tdVrdO = wg_mma_dV.partition_fragment_B(sdOt);
-        Tensor tdKrQ = wg_mma_dK.partition_fragment_B(sQt);
+        Tensor tdVrdO = wg_mma_dV.partition_fragment_B(sdOt)(_, _, _, _0{});
+        Tensor tdKrQ = wg_mma_dK.partition_fragment_B(sQt)(_, _, _, _0{});
+        static_assert(!dQ_swapAB);
+        Tensor tdQrdS = wg_mma_dQ.partition_fragment_A(sdS);
+        Tensor tdQrK = wg_mma_dQ.partition_fragment_B(sKt);
 
         int n_block = get<0>(block_coord);
         int bidh = get<1>(block_coord);
@@ -718,8 +717,8 @@ struct CollectiveMainloopBwd {
         int m_block = m_block_min;
 
         // thread_mma_S.partition_C(sLSEMma) has shape ((2, 2, V), MMA_M, MMA_N, PIPE), we only take the row indices.
-        Tensor tLSEsLSE = thread_mma_S.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _0{}, _);  // (2, V, PIPE)
-        Tensor tLSEsdPsum = thread_mma_S.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _0{}, _);
+        Tensor tLSEsLSE = thread_mma_S.partition_C(sLSEMma)(make_coord(_, _0{}, _), _0{}, _0{}, _0{});  // (2, V)
+        Tensor tLSEsdPsum = thread_mma_S.partition_C(sdPsumMma)(make_coord(_, _0{}, _), _0{}, _0{}, _0{});
 
 
         clear(tdKrdK);
@@ -741,39 +740,23 @@ struct CollectiveMainloopBwd {
             cutlass::arch::fence_view_async_shared();
             cutlass::arch::NamedBarrier::sync(kNThreadsdQ + cutlass::NumThreadsPerWarp, static_cast<int>(BwdNamedBarriers::dQEmpty) /*id*/);  // sdQ empty, ready to be written to
             Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
-            if constexpr (!dQ_swapAB) {
-                Tensor tdQrdS = wg_mma_dQ.partition_fragment_A(sdS);
-                Tensor tdQrK = wg_mma_dQ.partition_fragment_B(sKt);
-                flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dQ, tdQrdS, tdQrK, tdQrdQ);
-            } else {
-                Tensor tdQrdS = wg_mma_dQ.partition_fragment_B(sdS);
-                Tensor tdQrK = wg_mma_dQ.partition_fragment_A(sKt);
-                flash::gemm</*zero_init=*/true, /*wg_wait=*/1>(tiled_mma_dQ, tdQrK, tdQrdS, tdQrdQ);
-            }
-            pipeline_q.consumer_release(smem_pipe_read);  // release Q
-            warpgroup_wait<0>();
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(tiled_mma_dQ, tdQrdS, tdQrK, tdQrdQ);
             Tensor taccdQrdQ = r2s_thr_copy_dQaccum.retile_S(tdQrdQ);        // ((Atom,AtomNum), MMA_M, MMA_N)
             cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
             cutlass::arch::fence_view_async_shared();
             cutlass::arch::NamedBarrier::arrive(kNThreadsdQ + cutlass::NumThreadsPerWarp, static_cast<int>(BwdNamedBarriers::dQFull) /*id*/);  // sdQ full, to be written to gmem
         };
 
-        // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
-        // this helps quite a bit to not have to do causal masking for most of the iterations.
-        if constexpr (Is_causal) {
-            static constexpr int n_masking_steps = cute::ceil_div(kBlockN, kBlockM) + 1;
-            CUTLASS_PRAGMA_NO_UNROLL
-            for (; m_block < std::min(m_block_max, m_block_min + n_masking_steps); ++m_block) {
-                Tensor tSrS = partition_fragment_C(tiled_mma_S, select<1, 0>(TileShape_MNK{}));
-                pipeline_q.consumer_wait(smem_pipe_read);
-                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_S, tSrK, tSrQ(_, _, _, smem_pipe_read.index()), tSrS);
-                Tensor tLSErLSE = make_fragment_like(tLSEsLSE(_, _, _0{}));
-                cute::copy(tLSEsLSE(_, _, smem_pipe_read.index()), tLSErLSE);
+        auto main_loop = [&](auto causal_mask) {
+            pipeline_q.consumer_wait(smem_pipe_read);
 
-                Tensor tdPrdP = partition_fragment_C(tiled_mma_dP, select<1, 0>(TileShape_MNK{}));
-                pipeline_do.consumer_wait(smem_pipe_read);
-                flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, smem_pipe_read.index()), tdPrdP);
-                warpgroup_wait<1>();
+            Tensor tLSErLSE = make_fragment_like(tLSEsLSE);
+            cute::copy(tLSEsLSE, tLSErLSE);
+
+            Tensor tSrS = partition_fragment_C(tiled_mma_S, select<1, 0>(TileShape_MNK{}));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(tiled_mma_S, tSrK, tSrQ, tSrS);
+
+            if (causal_mask) {
                 Tensor cS = cute::make_identity_tensor(select<1, 0>(TileShape_MNK{}));
                 Tensor taccScS = thread_mma_S.partition_C(cS);
                 int causal_row_offset = 1 + seqlen_k - n_block * kBlockN - seqlen_q + m_block * kBlockM;
@@ -784,98 +767,83 @@ struct CollectiveMainloopBwd {
                         tSrS(i) = -INFINITY;
                     }
                 }
-                // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-                Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_transposed_rowcol(tSrS.layout()));
-                flash::scale_apply_exp2</*Scale_max=*/false, /*Check_inf=*/false>(scores, group_modes<0, 2>(tLSErLSE), params.softmax_scale_log2);
+            }
 
-                Tensor tLSErdPsum = make_fragment_like(tLSEsdPsum(_, _, _0{}));
-                cute::copy(tLSEsdPsum(_, _, smem_pipe_read.index()), tLSErdPsum);
+            Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_transposed_rowcol(tSrS.layout()));
+            flash::scale_apply_exp2</*Scale_max=*/false, /*Check_inf=*/false>(scores, group_modes<0, 2>(tLSErLSE), params.softmax_scale_log2);
 
-                // Convert scores from fp32 to fp16/bf16
-                Tensor rP = flash::convert_type<Element>(tSrS);
+            Tensor rP = flash::convert_type<Element>(tSrS);
 
-                warpgroup_wait<0>();
-                // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-                Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
-                for (int mi = 0; mi < size<0>(dS); ++mi) {
+            pipeline_do.consumer_wait(smem_pipe_read);
+
+            Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadV>(tSrS.layout()));
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_dV, tdVrP, tdVrdO, tdVrdV);
+
+            Tensor tdPrdP = partition_fragment_C(tiled_mma_dP, select<1, 0>(TileShape_MNK{}));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(tiled_mma_dP, tdPrV, tdPrdO, tdPrdP);
+
+            pipeline_do.consumer_release(smem_pipe_read);  // release dO
+
+            Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
+            Tensor rdS = make_tensor<Element>(tdPrdP.layout());
+            Tensor rdS_view = make_tensor(rdS.data(), scores.layout());
+            #pragma unroll
+            for (int m = 0; m < size<0>(dS) / 2; ++m) {
+                Tensor rdPsum_2row = make_tensor<ElementAccum>(Shape<_2>{});
+                cute::copy(tLSEsdPsum(_, m), rdPsum_2row);
+                Tensor dS_2row = make_tensor<ElementAccum>(make_shape(_2{}, size<1>(dS)));
+                #pragma unroll
+                for (int mm = 0; mm < 2; ++mm) {
+                    int mi = m * 2 + mm;
                     #pragma unroll
-                    for (int ni = 0; ni < size<1>(dS); ++ni) { dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) - tLSErdPsum(mi)); }
+                    for (int ni = 0; ni < size<1>(dS); ++ni) { dS_2row(mm, ni) = scores(mi, ni) * (dS(mi, ni) - rdPsum_2row(mm)); }
                 }
-                Tensor rdS = flash::convert_type<Element>(tdPrdP);
+                Tensor rdS_2row = flash::convert_type<Element>(dS_2row);
+                cute::copy(rdS_2row, rdS_view(make_coord(_, m % size<0, 1>(dS), m / size<0, 1>(dS)), _));
+            }
 
-                // Because of double buffering on dS, we don't need to sync here.
-                // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
-                // But because both WGs have to sync at the end of the loop and double buffering, this race condition
-                // is not possible.
-                Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS);     // ((Atom,AtomNum), MMA_N, MMA_N)
-                cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
+            Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadK>(tdPrdP.layout()));
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_dK, tdKrdS, tdKrQ, tdKrdK);
 
-                Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadV>(tSrS.layout()));
-                flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dV, tdVrP, tdVrdO(_, _, _, smem_pipe_read.index()), tdVrdV);
+            pipeline_q.consumer_release(smem_pipe_read);  // release Q
 
-                Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadK>(tdPrdP.layout()));
-                flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dK, tdKrdS, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
-                pipeline_do.consumer_release(smem_pipe_read);  // release dO
+            // Because of double buffering on dS, we don't need to sync here.
+            // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
+            // But because both WGs have to sync at the end of the loop and double buffering, this race condition
+            // is not possible.
+            cutlass::arch::NamedBarrier::sync(kNThreadsdQ, static_cast<int>(BwdNamedBarriers::dSFull) /*id*/);
+            auto smem_tiled_copy_PdS = make_tiled_copy_C(SmemCopyAtomPdS{}, tiled_mma_S);
+            auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(thread_idx);
+            Tensor tdSsdS = smem_thr_copy_PdS.partition_D(sdSt);      // ((Atom,AtomNum),PIPE_M,PIPE_N)
+            Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS);     // ((Atom,AtomNum), MMA_N, MMA_N)
+            cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
 
-                compute_dQ();
-                ++smem_pipe_read;
+            compute_dQ();
+
+            static_assert(kStages == 2);
+            const int scale = (smem_pipe_read.index() == 0 ? 1 : -1);
+            tSrQ.data() = tSrQ.data() + scale * (stride<2>(sQ) / 8);
+            tdVrdO.data() = tdVrdO.data() + scale * (stride<2>(sdO) / 8);
+            tdPrdO.data() = tdPrdO.data() + scale * (stride<2>(sdO) / 8);
+            tdKrQ.data() = tdKrQ.data() + scale * (stride<2>(sQ) / 8);
+            tLSEsLSE.data() = tLSEsLSE.data() + scale * stride<2>(sLSEMma);
+            tLSEsdPsum.data() = tLSEsdPsum.data() + scale * stride<2>(sdPsumMma);
+            ++smem_pipe_read;
+        };
+
+        // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
+        // this helps quite a bit to not have to do causal masking for most of the iterations.
+        if constexpr (Is_causal) {
+            static constexpr int n_masking_steps = cute::ceil_div(kBlockN, kBlockM) + 1;
+            CUTLASS_PRAGMA_NO_UNROLL
+            for (; m_block < std::min(m_block_max, m_block_min + n_masking_steps); ++m_block) {
+                main_loop(true);
             }
         }
 
         CUTLASS_PRAGMA_NO_UNROLL
         for (; m_block < m_block_max; ++m_block) {
-            Tensor tSrS = partition_fragment_C(tiled_mma_S, select<1, 0>(TileShape_MNK{}));
-            pipeline_q.consumer_wait(smem_pipe_read);
-            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_S, tSrK, tSrQ(_, _, _, smem_pipe_read.index()), tSrS);
-            Tensor tLSErLSE = make_fragment_like(tLSEsLSE(_, _, _0{}));
-            cute::copy(tLSEsLSE(_, _, smem_pipe_read.index()), tLSErLSE);
-
-            Tensor tdPrdP = partition_fragment_C(tiled_mma_dP, select<1, 0>(TileShape_MNK{}));
-            pipeline_do.consumer_wait(smem_pipe_read);
-            flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_dP, tdPrV, tdPrdO(_, _, _, smem_pipe_read.index()), tdPrdP);
-            warpgroup_wait<1>();
-            Tensor cS = cute::make_identity_tensor(select<1, 0>(TileShape_MNK{}));
-            Tensor taccScS = thread_mma_S.partition_C(cS);
-            #pragma unroll
-            for (int i = 0; i < size(tSrS); ++i) {
-                if (int(get<0>(taccScS(i))) >= int(seqlen_k - n_block * kBlockN)) { tSrS(i) = -INFINITY; }
-            }
-            // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-            Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_transposed_rowcol(tSrS.layout()));
-            // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tLSErLSE); }
-            // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(scores); }
-            flash::scale_apply_exp2</*Scale_max=*/false, /*Check_inf=*/false>(scores, group_modes<0, 2>(tLSErLSE), params.softmax_scale_log2);
-            // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(scores); }
-
-            Tensor tLSErdPsum = make_fragment_like(tLSEsdPsum(_, _, _0{}));
-            cute::copy(tLSEsdPsum(_, _, smem_pipe_read.index()), tLSErdPsum);
-
-            // Convert scores from fp32 to fp16/bf16
-            Tensor rP = flash::convert_type<Element>(tSrS);
-
-            warpgroup_wait<0>();
-            // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
-            Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
-            #pragma unroll
-            for (int mi = 0; mi < size<0>(dS); ++mi) {
-                #pragma unroll
-                for (int ni = 0; ni < size<1>(dS); ++ni) { dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) - tLSErdPsum(mi)); }
-            }
-            // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(dS); }
-            Tensor rdS = flash::convert_type<Element>(tdPrdP);
-
-            Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS);     // ((Atom,AtomNum), MMA_N, MMA_N)
-            cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
-
-            Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadV>(tSrS.layout()));
-            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dV, tdVrP, tdVrdO(_, _, _, smem_pipe_read.index()), tdVrdV);
-
-            Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadK>(tdPrdP.layout()));
-            flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dK, tdKrdS, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
-            pipeline_do.consumer_release(smem_pipe_read);  // release dO
-
-            compute_dQ();
-            ++smem_pipe_read;
+            main_loop(false);
         }
         // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
         #pragma unroll
