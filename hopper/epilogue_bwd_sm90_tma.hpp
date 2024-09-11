@@ -78,7 +78,7 @@ struct CollectiveEpilogueBwd {
     using SmemLayoutdK = decltype(tile_to_shape(SmemLayoutAtomdK{}, select<1, 2>(TileShape_MNK{})));
     using SmemLayoutdV = decltype(tile_to_shape(SmemLayoutAtomdV{}, select<1, 2>(TileShapeV_MNK{})));
 
-    using SmemCopyAtomdKV = Copy_Atom<cute::SM90_U32x4_STSM_N, Element>;
+    using SmemCopyAtomdKV = Copy_Atom<DefaultCopy, Element>;
 
     struct TensorStorage : cute::aligned_struct<128> {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutdK>> smem_dk;
