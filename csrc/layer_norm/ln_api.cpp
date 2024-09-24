@@ -217,7 +217,7 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
     if (out_.has_value()) {
         z = out_.value();
     } else {
-        auto z = torch::empty(z_subset_.has_value() ? c10::IntArrayRef{z_numrows, cols} : sizes, opts.dtype(otype));
+        z = torch::empty(z_subset_.has_value() ? c10::IntArrayRef{z_numrows, cols} : sizes, opts.dtype(otype));
     }
 
     auto mu = torch::empty({ rows }, opts.dtype(ctype));
