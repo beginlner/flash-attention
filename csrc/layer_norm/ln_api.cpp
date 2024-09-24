@@ -104,6 +104,7 @@ layer_norm::BwdFunction & get_parallel_bwd_launcher(torch::Dtype wtype, torch::D
 
 std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: BxSxhidden_size
                                            c10::optional<const at::Tensor> &residual_,  // Residual: BxSxhidden_size
+                                           c10::optional<const at::Tensor> &out_,  // Out: BxSxhidden_size
                                            const at::Tensor &gamma,   // hidden_size
                                            c10::optional<const at::Tensor> &beta_,   // hidden_size
                                            c10::optional<const at::Tensor> &rowscale_,      // BxS
@@ -160,6 +161,13 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
         TORCH_CHECK(residual.sizes() == sizes);
     }
 
+    if (out_.has_value()) {
+        auto out = out_.value();
+        TORCH_CHECK(out.is_cuda());
+        TORCH_CHECK(out.is_contiguous());
+        TORCH_CHECK(out.sizes() == sizes);
+    }
+
     if (rowscale_.has_value()) {
         auto rowscale = rowscale_.value();
         TORCH_CHECK(rowscale.is_cuda());
@@ -205,7 +213,12 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
     if (save_x) { x = torch::empty(sizes, opts.dtype(rtype)); }
     at::Tensor dmask;
     if (dropout_p > 0.f) { dmask = torch::empty(x0.sizes(), opts.dtype(mtype)); };
-    auto z = torch::empty(z_subset_.has_value() ? c10::IntArrayRef{z_numrows, cols} : sizes, opts.dtype(otype));
+    at::Tensor z;
+    if (out_.has_value()) {
+        z = out_.value();
+    } else {
+        auto z = torch::empty(z_subset_.has_value() ? c10::IntArrayRef{z_numrows, cols} : sizes, opts.dtype(otype));
+    }
 
     auto mu = torch::empty({ rows }, opts.dtype(ctype));
     auto rsigma = torch::empty({ rows }, opts.dtype(ctype));
@@ -834,7 +847,7 @@ std::vector<at::Tensor> dropout_add_ln_parallel_residual_bwd(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "CUDA DropoutAddLayerNorm";
     m.def("dropout_add_ln_fwd", &dropout_add_ln_fwd, "Run Dropout + Add + LayerNorm forward kernel",
-          py::arg("x0"), py::arg("residual"), py::arg("gamma"), py::arg("beta_"),
+          py::arg("x0"), py::arg("residual"), py::arg("out"), py::arg("gamma"), py::arg("beta_"),
           py::arg("rowscale_"), py::arg("colscale_"), py::arg("x0_subset_"), py::arg("z_subset_"),
           py::arg("dropout_p"), py::arg("epsilon"), py::arg("rowscale_const"), py::arg("z_numrows"),
           py::arg("gen_"), py::arg("residual_in_fp32")=false, py::arg("is_rms_norm")=false, py::arg("out_scale")=1.0);
