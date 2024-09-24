@@ -104,7 +104,6 @@ layer_norm::BwdFunction & get_parallel_bwd_launcher(torch::Dtype wtype, torch::D
 
 std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: BxSxhidden_size
                                            c10::optional<const at::Tensor> &residual_,  // Residual: BxSxhidden_size
-                                           c10::optional<const at::Tensor> &out_,  // Out: BxSxhidden_size
                                            const at::Tensor &gamma,   // hidden_size
                                            c10::optional<const at::Tensor> &beta_,   // hidden_size
                                            c10::optional<const at::Tensor> &rowscale_,      // BxS
@@ -118,7 +117,8 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
                                            c10::optional<at::Generator> gen_,
                                            bool residual_in_fp32=false,
                                            bool is_rms_norm=false,
-                                           float out_scale=1.0
+                                           float out_scale=1.0,
+                                           std::optional<const at::Tensor> out_=std::nullopt  // Out: BxSxhidden_size
 ) {
     auto itype = x0.scalar_type();
     auto rtype = residual_.has_value()
@@ -847,10 +847,10 @@ std::vector<at::Tensor> dropout_add_ln_parallel_residual_bwd(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "CUDA DropoutAddLayerNorm";
     m.def("dropout_add_ln_fwd", &dropout_add_ln_fwd, "Run Dropout + Add + LayerNorm forward kernel",
-          py::arg("x0"), py::arg("residual"), py::arg("out"), py::arg("gamma"), py::arg("beta_"),
+          py::arg("x0"), py::arg("residual"), py::arg("gamma"), py::arg("beta_"),
           py::arg("rowscale_"), py::arg("colscale_"), py::arg("x0_subset_"), py::arg("z_subset_"),
           py::arg("dropout_p"), py::arg("epsilon"), py::arg("rowscale_const"), py::arg("z_numrows"),
-          py::arg("gen_"), py::arg("residual_in_fp32")=false, py::arg("is_rms_norm")=false, py::arg("out_scale")=1.0);
+          py::arg("gen_"), py::arg("residual_in_fp32")=false, py::arg("is_rms_norm")=false, py::arg("out_scale")=1.0, py::arg("out_")=std::nullopt);
     m.def("dropout_add_ln_bwd", &dropout_add_ln_bwd, "Run Dropout + Add + LayerNorm backward kernel",
           py::arg("dz"), py::arg("dx_"), py::arg("x"), py::arg("x0_"), py::arg("dmask_"), py::arg("mu"),
           py::arg("rsigma"), py::arg("gamma"), py::arg("rowscale_"), py::arg("colscale_"),
