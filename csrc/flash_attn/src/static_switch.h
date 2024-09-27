@@ -176,6 +176,10 @@
     }                                      \
   }()
 
+#ifdef FLASHATTENTION_DISABLE_KVCACHE_QUANTIZATION
+#define KVCACHE_QUANTIZATION_TYPE_SWITCH(TYPE, ...) \
+  [&] {}
+#else
 #define KVCACHE_QUANTIZATION_TYPE_SWITCH(TYPE, ...) \
   [&] {                                             \
     if (TYPE == 1) {                                \
@@ -199,7 +203,12 @@
         false, "Unsupported TYPE");                 \
     }                                               \
   }()
+#endif
 
+#ifdef FLASHATTENTION_DISABLE_KVCACHE_QUANTIZATION
+#define KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(TYPE, ...)         \
+  [&] {}
+#else
 #define KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(SPLIT_LENGTH, ...) \
   [&] {                                                             \
     if (SPLIT_LENGTH == 512) {                                      \
@@ -216,3 +225,4 @@
         false, "Unsupported SplitLength");                          \
     }                                                               \
   }()
+#endif
