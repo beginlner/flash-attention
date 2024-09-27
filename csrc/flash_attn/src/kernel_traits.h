@@ -122,7 +122,8 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kSmemKVSize = (Share_KV ? size(SmemLayoutK{}) * 2 : size(SmemLayoutK{}) + size(SmemLayoutV{})) * sizeof(Element);
     static constexpr int kSmemPSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutP{}) * sizeof(Element);
     static constexpr int kSmemRowSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutRow{}) * 3 * sizeof(float);
-    static constexpr int kSmemSize = Share_Q_K_smem ? std::max(kSmemQSize, kSmemKVSize) : kSmemQSize + kSmemKVSize + kSmemPSize + kSmemRowSize;
+    static constexpr int kSmemBlockTableSize = kNThreadsS == kNThreads ? (PARTITION_SIZE / 32) * sizeof(int) : 0;
+    static constexpr int kSmemSize = Share_Q_K_smem ? std::max(kSmemQSize, kSmemKVSize) : kSmemQSize + kSmemKVSize + kSmemPSize + kSmemRowSize + kSmemBlockTableSize;
 
     static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
     static_assert(kHeadDim % kGmemElemsPerLoad == 0, "kHeadDim must be a multiple of kGmemElemsPerLoad");

@@ -588,7 +588,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     Tensor tScale_osScale_o = sScale_o(_, tidx % Kernel_traits::kNThreadsS);
 
     if (block_table != nullptr) {
-        int *block_table_shared = reinterpret_cast<int *>(sScale_o.data().get().get() + size(sScale_o));
+        int *block_table_shared = Kernel_traits::kNThreadsS < Kernel_traits::kNThreads ?
+            reinterpret_cast<int *>(sScale_o.data().get().get() + size(sScale_o)) :
+            reinterpret_cast<int *>(sP.data().get().get());
         int n_page_min = n_block_min * kBlockN / params.page_block_size;
         int n_page_max = (n_block_max - 1) * kBlockN / params.page_block_size;
         for (int i = tidx; i <= n_page_max - n_page_min; i += Kernel_traits::kNThreads) {
