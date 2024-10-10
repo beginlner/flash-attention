@@ -222,9 +222,11 @@ void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
     FLASH_ASSERT(params.d_v == 128);
     constexpr static int HeaddimV = 128;
     BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-        BOOL_SWITCH(params.cu_seqlens_q != nullptr || params.cu_seqlens_k != nullptr, Varlen, [&] {
-            BOOL_SWITCH(params.deterministic, Deterministic, [&] {
-                run_flash_bwd<Headdim, 64, 128, T, Is_causal, Varlen, Deterministic, false, false, 1, 2, 1, HeaddimV>(params, stream);
+        BOOL_SWITCH(params.is_local, Is_local, [&] {
+            BOOL_SWITCH(params.cu_seqlens_q != nullptr || params.cu_seqlens_k != nullptr, Varlen, [&] {
+                BOOL_SWITCH(params.deterministic, Deterministic, [&] {
+                    run_flash_bwd<Headdim, 64, 128, T, Is_causal, Is_local && !Is_causal, Varlen, Deterministic, false, false, 1, 2, 1, HeaddimV>(params, stream);
+                });
             });
         });
     });
