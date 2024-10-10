@@ -813,22 +813,15 @@ struct CollectiveMainloopBwd {
                         }
                     }
                 }
-            } else {
-                if constexpr (!Is_local) {
-                    #pragma unroll
-                    for (int i = 0; i < size(tSrS); ++i) {
-                        if (int(get<0>(taccScS(i))) >= int(seqlen_k - n_block * kBlockN)) { tSrS(i) = -INFINITY; }
-                    }
-                } else {
-                    int local_row_offset_right = 1 + seqlen_k - n_block * kBlockN - seqlen_q + m_block * kBlockM + params.window_size_right;
-                    int local_row_offset_left = seqlen_k - n_block * kBlockN - seqlen_q + m_block * kBlockM - params.window_size_left;
-                    #pragma unroll
-                    for (int i = 0; i < size(tSrS); ++i) {
-                        if ((int(get<0>(taccScS(i))) >= 
-                            std::min(int(get<1>(taccScS(i))) + local_row_offset_right, seqlen_k - n_block * kBlockN)
-                            ) || (int(get<0>(taccScS(i))) < std::max(0, local_row_offset_left))) {
-                            tSrS(i) = -INFINITY;
-                        }
+            } else if constexpr (Is_local) {
+                int local_row_offset_right = 1 + seqlen_k - n_block * kBlockN - seqlen_q + m_block * kBlockM + params.window_size_right;
+                int local_row_offset_left = seqlen_k - n_block * kBlockN - seqlen_q + m_block * kBlockM - params.window_size_left;
+                #pragma unroll
+                for (int i = 0; i < size(tSrS); ++i) {
+                    if ((int(get<0>(taccScS(i))) >= 
+                        std::min(int(get<1>(taccScS(i))) + local_row_offset_right, seqlen_k - n_block * kBlockN)
+                        ) || (int(get<0>(taccScS(i))) < std::max(0, local_row_offset_left))) {
+                        tSrS(i) = -INFINITY;
                     }
                 }
             }
