@@ -441,6 +441,10 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kHeadDimV = Kernel_traits::kHeadDimV;
     constexpr int kNWarpsS = Kernel_traits::kNWarpsS;
+    constexpr int kNThreads = Kernel_traits::kNThreads;
+    constexpr int kNThreadsS = Kernel_traits::kNThreadsS;
+    constexpr bool QKCooperative = Kernel_traits::QKCooperative;
+
 
     using GmemTiledCopyO = std::conditional_t<
         !Split,
@@ -465,7 +469,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     }
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
         if (Split && !Is_local) { return; }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+        if (!QKCooperative && tidx >= kNThreadsS) {
             return;
         }
         // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
@@ -547,11 +551,13 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
     typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
+    typename Kernel_traits::GmemTiledCopyK gmem_tiled_copy_K;
+    auto gmem_thr_copy_K = gmem_tiled_copy_K.get_thread_slice(QKCooperative ? tidx : tidx - kNThreadsS);
 
     Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
     Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
-    Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K)
-    Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
+    Tensor tKgK = gmem_thr_copy_K.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K)
+    Tensor tKsK = gmem_thr_copy_K.partition_D(sK);
     Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
     Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
 
@@ -571,29 +577,29 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
                                   Shape<Int<kBlockN>, Int<kHeadDim - Kernel_traits::SplitLength>>{},
                                   make_stride(kquant1_row_stride, _1{}));
     typename Kernel_traits::GmemTiledCopyKQuant0 gmem_tiled_copy_KQuant0;
-    auto gmem_thr_copy_KQuant0 = gmem_tiled_copy_KQuant0.get_thread_slice(tidx);
+    auto gmem_thr_copy_KQuant0 = gmem_tiled_copy_KQuant0.get_thread_slice(QKCooperative ? tidx : tidx - kNThreadsS);
     Tensor tKQuant0gKQuant0 = gmem_thr_copy_KQuant0.partition_S(gKQuant0);
     Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
     Tensor tKQuant0rKQuant0_high = make_tensor<Element>(tKQuant0rKQuant0.layout());
     typename Kernel_traits::GmemTiledCopyKQuant1 gmem_tiled_copy_KQuant1;
-    auto gmem_thr_copy_KQuant1 = gmem_tiled_copy_KQuant1.get_thread_slice(tidx);
+    auto gmem_thr_copy_KQuant1 = gmem_tiled_copy_KQuant1.get_thread_slice(QKCooperative ? tidx : tidx - kNThreadsS);
     Tensor tKQuant1gKQuant1 = gmem_thr_copy_KQuant1.partition_S(gKQuant1);
     typename Kernel_traits::SmemTiledCopyK smem_tiled_copy_K;
     Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
     Tensor tKQuant1rKQuant1_high = make_tensor<Element>(tKQuant1rKQuant1.layout());
 
     Tensor sP = make_tensor(Kernel_traits::Share_KV ? sK.data() + 2 * size(sK) : sV.data() + size(sV), typename Kernel_traits::SmemLayoutP{});
-    Tensor tPsP = sP(_, tidx % Kernel_traits::kNThreadsS, _, _);
+    Tensor tPsP = sP(_, tidx % kNThreadsS, _, _);
     Tensor sScale_o = make_tensor(recast_ptr<float>(sP.data() + size(sP)), typename Kernel_traits::SmemLayoutRow{});
-    Tensor tScale_osScale_o = sScale_o(_, tidx % Kernel_traits::kNThreadsS);
+    Tensor tScale_osScale_o = sScale_o(_, tidx % kNThreadsS);
 
     if (block_table != nullptr) {
-        int *block_table_shared = Kernel_traits::kNThreadsS < Kernel_traits::kNThreads ?
+        int *block_table_shared = !QKCooperative ?
             reinterpret_cast<int *>(sScale_o.data().get().get() + size(sScale_o)) :
             reinterpret_cast<int *>(sP.data().get().get());
         int n_page_min = n_block_min * kBlockN / params.page_block_size;
         int n_page_max = (n_block_max - 1) * kBlockN / params.page_block_size;
-        for (int i = tidx; i <= n_page_max - n_page_min; i += Kernel_traits::kNThreads) {
+        for (int i = tidx; i <= n_page_max - n_page_min; i += kNThreads) {
             block_table_shared[i] = block_table[i + n_page_min];
         }
         block_table = block_table_shared - n_page_min;
@@ -625,7 +631,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
     // Repeat the partitioning with identity layouts
     Tensor tQcQ = gmem_thr_copy_QKV.partition_S(cQ);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
-    Tensor tKVcKV = gmem_thr_copy_QKV.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
+    Tensor tKVcKV = gmem_thr_copy_K.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
 
     // Allocate predicate tensors for k
     Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
@@ -687,7 +693,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
                                                 + row_offset_vnew - binfo.seqlen_k_cache * params.vnew_row_stride),
                                   Shape<Int<kBlockN>, Int<kHeadDimV>>{},
                                   make_stride(params.vnew_row_stride, _1{}));
-        Tensor tKgKnew = gmem_thr_copy_QKV.partition_S(gKnew);  // (KCPY, KCPY_N, KCPY_K)
+        Tensor tKgKnew = gmem_thr_copy_K.partition_S(gKnew);  // (KCPY, KCPY_N, KCPY_K)
         Tensor tVgVnew = gmem_thr_copy_QKV.partition_S(gVnew);  // (VCPY, VCPY_N, VCPY_K)
 
         const int n_block_copy_min = std::max(n_block_min, binfo.seqlen_k_cache / kBlockN);
@@ -837,18 +843,20 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     }
 
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
-    if (Kernel_traits::SplitLength == 0) {
-        flash::copy<Is_even_MN, Is_even_K, Kernel_traits::Share_KV>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV,
-                                                                    binfo.actual_seqlen_k - n_block * kBlockN);
-    } else {
-        #pragma unroll
-        for (int n = 0; n < size<1>(tKsK); ++n) {
-            if (Is_even_MN || get<0>(tKVcKV(0, n, 0)) < binfo.actual_seqlen_k - n_block * kBlockN) {
-                LDG_K(n);
-                Cast_K(n);
-                STS_K(n);
-            } else {
-                clear(tKsK(_, n, _));
+    if (QKCooperative || tidx >= kNThreadsS) {
+        if (Kernel_traits::SplitLength == 0) {
+            flash::copy<Is_even_MN, Is_even_K, Kernel_traits::Share_KV>(gmem_tiled_copy_K, tKgK, tKsK, tKVcKV, tKVpKV,
+                                                                        binfo.actual_seqlen_k - n_block * kBlockN);
+        } else {
+            #pragma unroll
+            for (int n = 0; n < size<1>(tKsK); ++n) {
+                if (Is_even_MN || get<0>(tKVcKV(0, n, 0)) < binfo.actual_seqlen_k - n_block * kBlockN) {
+                    LDG_K(n);
+                    Cast_K(n);
+                    STS_K(n);
+                } else {
+                    clear(tKsK(_, n, _));
+                }
             }
         }
     }
@@ -899,7 +907,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
                 tKsK.data() = tKsK.data() + sK_offset;
             }
             if (Kernel_traits::SplitLength == 0) {
-                flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
+                flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_K, tKgK, tKsK, tKVcKV, tKVpKV);
                 // This cp_async_fence needs to be in the if block, otherwise the synchronization
                 // isn't right and we get race conditions.
                 cute::cp_async_fence();
@@ -918,10 +926,10 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
         : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
     #pragma unroll
     for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step, --n_block) {
-        if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
+        if (QKCooperative || tidx < kNThreadsS) {
             clear(tSrS);
         }
-        if (Kernel_traits::SplitLength == 0 || std::is_same_v<KV_type1, Element> || masking_step == 0) {
+        if ((Kernel_traits::SplitLength == 0 || std::is_same_v<KV_type1, Element>) && (QKCooperative || tidx >= kNThreadsS) || masking_step == 0) {
             flash::cp_async_wait<0>();
         }
         __syncthreads();
@@ -948,9 +956,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
             cute::cp_async_fence();
         }
 
-        if (Kernel_traits::Share_KV) { LoadK(n_block); }
+        if (Kernel_traits::Share_KV && (QKCooperative || tidx >= kNThreadsS)) { LoadK(n_block); }
 
-        if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
+        if (QKCooperative || tidx < kNThreadsS) {
             flash::gemm(tiled_mma, tSrQ, tSrK, tSrS);
             // if (cute::thread0()) { print(acc_s); }
 
@@ -970,7 +978,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
         Tensor rP = make_tensor<Element>(acc_s.layout());
         Tensor scale_o = make_tensor<float>(Shape<_2>{});
-        if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
+        if (QKCooperative || tidx < kNThreadsS) {
             // We have key_padding_mask so we'll need to Check_inf
             scale_o = masking_step == 0
                 ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local || !Is_even_MN, false>(acc_s, acc_o, params.scale_softmax_log2)
@@ -979,14 +987,14 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
             // Convert acc_s from fp32 to fp16/bf16
             cute::copy(flash::convert_type<Element>(acc_s), rP);
-            if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
+            if (!QKCooperative) {
                 cute::copy(rP, tPsP);
                 cute::copy(scale_o, tScale_osScale_o);
             }
         }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) { __syncthreads(); }
+        if (!QKCooperative) { __syncthreads(); }
 
-        if (Kernel_traits::SplitLength > 0 && n_block > n_block_min) {
+        if (Kernel_traits::SplitLength > 0 && (QKCooperative || tidx >= kNThreadsS) && n_block > n_block_min) {
 #pragma unroll
             for (int n = 0; n < size<1>(tKsK); ++n) {
                 Cast_K(n);
@@ -997,7 +1005,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
             }
         }
 
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+        if (!QKCooperative && tidx >= kNThreadsS) {
             cute::copy(tPsP, rP);
             cute::copy(tScale_osScale_o, scale_o);
         }
@@ -1024,10 +1032,10 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
     // These are the iterations where we don't need masking on S
     for (; n_block >= n_block_min; --n_block) {
-        if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
+        if (QKCooperative || tidx < kNThreadsS) {
             clear(tSrS);
         }
-        if (Kernel_traits::SplitLength == 0 || std::is_same_v<KV_type1, Element>) {
+        if ((Kernel_traits::SplitLength == 0 || std::is_same_v<KV_type1, Element>) && (QKCooperative || tidx >= kNThreadsS)) {
             flash::cp_async_wait<0>();
         }
         __syncthreads();
@@ -1047,9 +1055,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
             cute::cp_async_fence();
         }
 
-        if (Kernel_traits::Share_KV) { LoadK(n_block); }
+        if (Kernel_traits::Share_KV && (QKCooperative || tidx >= kNThreadsS)) { LoadK(n_block); }
 
-        if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
+        if (QKCooperative || tidx < kNThreadsS) {
             flash::gemm(tiled_mma, tSrQ, tSrK, tSrS);
         }
 
@@ -1062,7 +1070,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
         Tensor rP = make_tensor<Element>(acc_s.layout());
         Tensor scale_o = make_tensor<float>(Shape<_2>{});
-        if (Kernel_traits::kNThreadsS == Kernel_traits::kNThreads || tidx < Kernel_traits::kNThreadsS) {
+        if (QKCooperative || tidx < kNThreadsS) {
             mask.template apply_mask</*Causal_mask=*/false>(
                 acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarpsS * 16
             );
@@ -1070,14 +1078,14 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
             // Convert acc_s from fp32 to fp16/bf16
             cute::copy(flash::convert_type<Element>(acc_s), rP);
-            if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
+            if (!QKCooperative) {
                 cute::copy(rP, tPsP);
                 cute::copy(scale_o, tScale_osScale_o);
             }
         }
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) { __syncthreads(); }
+        if (!QKCooperative) { __syncthreads(); }
 
-        if (Kernel_traits::SplitLength > 0 && n_block > n_block_min) {
+        if (Kernel_traits::SplitLength > 0 && (QKCooperative || tidx >= kNThreadsS) && n_block > n_block_min) {
 #pragma unroll
             for (int n = 0; n < size<1>(tKsK); ++n) {
                 Cast_K(n);
@@ -1088,7 +1096,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
             }
         }
 
-        if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+        if (!QKCooperative && tidx >= kNThreadsS) {
             cute::copy(tPsP, rP);
             cute::copy(tScale_osScale_o, scale_o);
         }
@@ -1110,17 +1118,17 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     // Epilogue
 
     Tensor sRow_max = make_tensor(sScale_o.data() + size(sScale_o), typename Kernel_traits::SmemLayoutRow{});
-    Tensor tRow_maxsRow_max = sRow_max(_, tidx % Kernel_traits::kNThreadsS);
+    Tensor tRow_maxsRow_max = sRow_max(_, tidx % kNThreadsS);
     Tensor sRow_sum = make_tensor(sRow_max.data() + size(sRow_max), typename Kernel_traits::SmemLayoutRow{});
-    Tensor tRow_sumsRow_sum = sRow_sum(_, tidx % Kernel_traits::kNThreadsS);
-    if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx < Kernel_traits::kNThreadsS) {
+    Tensor tRow_sumsRow_sum = sRow_sum(_, tidx % kNThreadsS);
+    if (!QKCooperative && tidx < kNThreadsS) {
         cute::copy(softmax.row_max, tRow_maxsRow_max);
         cute::copy(softmax.row_sum, tRow_sumsRow_sum);
     }
-    if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads) {
+    if (!QKCooperative) {
         __syncthreads();
     }
-    if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+    if (!QKCooperative && tidx >= kNThreadsS) {
         cute::copy(tRow_maxsRow_max, softmax.row_max);
         cute::copy(tRow_sumsRow_sum, softmax.row_sum);
     }
@@ -1166,7 +1174,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
 
     __syncthreads();
 
-    if (Kernel_traits::kNThreadsS < Kernel_traits::kNThreads && tidx >= Kernel_traits::kNThreadsS) {
+    if (!QKCooperative && tidx >= kNThreadsS) {
         return;
     }
 
