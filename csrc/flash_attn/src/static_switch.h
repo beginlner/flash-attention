@@ -182,7 +182,19 @@
 #else
 #define KVCACHE_QUANTIZATION_TYPE_SWITCH(TYPE, ...) \
   [&] {                                             \
-    if (TYPE == 4) {                                \
+    if (TYPE == 1) {                                \
+      using quant_type0 = cutlass::int4b_t;         \
+      using quant_type1 = int8_t;                   \
+      return __VA_ARGS__();                         \
+    } else if (TYPE == 2) {                         \
+      using quant_type0 = cutlass::int4b_t;         \
+      using quant_type1 = cutlass::bfloat16_t;      \
+      return __VA_ARGS__();                         \
+    } else if (TYPE == 3) {                         \
+      using quant_type0 = int8_t;                   \
+      using quant_type1 = int8_t;                   \
+      return __VA_ARGS__();                         \
+    } else if (TYPE == 4) {                         \
       using quant_type0 = int8_t;                   \
       using quant_type1 = cutlass::bfloat16_t;      \
       return __VA_ARGS__();                         \
@@ -201,6 +213,12 @@
   [&] {                                                             \
     if (SPLIT_LENGTH == 512) {                                      \
       constexpr static int SplitLength = 512;                       \
+      return __VA_ARGS__();                                         \
+    } else if (SPLIT_LENGTH == 480) {                               \
+      constexpr static int SplitLength = 480;                       \
+      return __VA_ARGS__();                                         \
+    } else if (SPLIT_LENGTH == 384) {                               \
+      constexpr static int SplitLength = 384;                       \
       return __VA_ARGS__();                                         \
     } else {                                                        \
       TORCH_CHECK(                                                  \
