@@ -182,19 +182,7 @@
 #else
 #define KVCACHE_QUANTIZATION_TYPE_SWITCH(TYPE, ...) \
   [&] {                                             \
-    if (TYPE == 1) {                                \
-      using quant_type0 = cutlass::int4b_t;         \
-      using quant_type1 = int8_t;                   \
-      return __VA_ARGS__();                         \
-    } else if (TYPE == 2) {                         \
-      using quant_type0 = cutlass::int4b_t;         \
-      using quant_type1 = cutlass::bfloat16_t;      \
-      return __VA_ARGS__();                         \
-    } else if (TYPE == 3) {                         \
-      using quant_type0 = int8_t;                   \
-      using quant_type1 = int8_t;                   \
-      return __VA_ARGS__();                         \
-    } else if (TYPE == 4) {                         \
+    if (TYPE == 4) {                                \
       using quant_type0 = int8_t;                   \
       using quant_type1 = cutlass::bfloat16_t;      \
       return __VA_ARGS__();                         \
@@ -214,15 +202,37 @@
     if (SPLIT_LENGTH == 512) {                                      \
       constexpr static int SplitLength = 512;                       \
       return __VA_ARGS__();                                         \
-    } else if (SPLIT_LENGTH == 480) {                               \
-      constexpr static int SplitLength = 480;                       \
-      return __VA_ARGS__();                                         \
-    } else if (SPLIT_LENGTH == 384) {                               \
-      constexpr static int SplitLength = 384;                       \
-      return __VA_ARGS__();                                         \
     } else {                                                        \
       TORCH_CHECK(                                                  \
         false, "Unsupported SplitLength");                          \
     }                                                               \
   }()
 #endif
+
+#define NUM_SPLITS_SWITCH(NUM_SPLITS, LOG_MAX_SPLITS, ...)                     \
+  [&] {                                                                        \
+    if (NUM_SPLITS <= 2) {                                                     \
+      constexpr static int LOG_MAX_SPLITS = 1;                                 \
+      return __VA_ARGS__();                                                    \
+    } else if (NUM_SPLITS <= 4) {                                              \
+      constexpr static int LOG_MAX_SPLITS = 2;                                 \
+      return __VA_ARGS__();                                                    \
+    } else if (NUM_SPLITS <= 8) {                                              \
+      constexpr static int LOG_MAX_SPLITS = 3;                                 \
+      return __VA_ARGS__();                                                    \
+    } else if (NUM_SPLITS <= 16) {                                             \
+      constexpr static int LOG_MAX_SPLITS = 4;                                 \
+      return __VA_ARGS__();                                                    \
+    } else if (NUM_SPLITS <= 32) {                                             \
+      constexpr static int LOG_MAX_SPLITS = 5;                                 \
+      return __VA_ARGS__();                                                    \
+    } else if (NUM_SPLITS <= 64) {                                             \
+      constexpr static int LOG_MAX_SPLITS = 6;                                 \
+      return __VA_ARGS__();                                                    \
+    } else if (NUM_SPLITS <= 128) {                                            \
+      constexpr static int LOG_MAX_SPLITS = 7;                                 \
+      return __VA_ARGS__();                                                    \
+    } else {                                                                   \
+      TORCH_CHECK(false, "Only support num_splits <= 128");                    \
+    }                                                                          \
+  }()
