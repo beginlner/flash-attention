@@ -186,13 +186,13 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
                 if (params.num_splits > 1) {
                     // Launch the split kernel in another stream.
                     wait_stream(stream1, stream);
-                    auto split_kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, true, false>;
+                    auto split_kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, true, false>;
                     smem_size = std::max(smem_size, size(typename Kernel_traits::SmemLayoutO{}) * sizeof(typename Kernel_traits::ElementAccum));
                     C10_CUDA_CHECK(cudaFuncSetAttribute(split_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                     split_kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream1>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                 }
-                auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, false, false>;
+                auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, false, false>;
                 C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 kernel<<<dim3(num_m_block, 1, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
