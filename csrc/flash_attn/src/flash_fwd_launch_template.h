@@ -47,6 +47,14 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_kernel, bool Is_causal, bool Is_lo
     #endif
 }
 
+DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_mla_kernel, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV) {
+#if defined(ARCH_SUPPORTS_FLASH)
+    flash::compute_attn_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params);
+#else
+    FLASH_UNSUPPORTED_ARCH
+#endif
+}
+
 DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int Log_max_splits, bool Is_even_K) {
     static_assert(Log_max_splits >= 1);
     flash::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
@@ -165,6 +173,48 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     }
 }
 
+template<typename Kernel_traits>
+void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
+    TORCH_CHECK(!params.unpadded_lse);
+    if (extra_stream_ptr == nullptr) extra_stream_ptr = std::make_shared<cudaStream_t>(at::cuda::getStreamFromPool(true).stream());
+    auto stream1 = *extra_stream_ptr;
+    size_t smem_size = Kernel_traits::kSmemSize;
+    const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
+    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
+            ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
+                if (params.num_splits > 1) {
+                    // Launch the split kernel in another stream.
+                    wait_stream(stream1, stream);
+                    auto split_kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, true, false>;
+                    smem_size = std::max(smem_size, size(typename Kernel_traits::SmemLayoutO{}) * sizeof(typename Kernel_traits::ElementAccum));
+                    C10_CUDA_CHECK(cudaFuncSetAttribute(split_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                    split_kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream1>>>(params);
+                    C10_CUDA_KERNEL_LAUNCH_CHECK();
+                }
+                auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, false, false>;
+                C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                kernel<<<dim3(num_m_block, 1, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
+                C10_CUDA_KERNEL_LAUNCH_CHECK();
+            });
+        });
+    });
+    if (params.num_splits > 1) {
+        // We want kBlockM to be as small as possible for more parallelism.
+        // With 128 threads we can load 512 elements at a time, so if headdim is divisible by 128, kBlockM = 4.
+        // If headdim is divisible by 64, then we set kBlockM = 8, etc.
+        constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
+        dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
+        EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
+            NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+                C10_CUDA_KERNEL_LAUNCH_CHECK();
+            });
+        });
+        wait_stream(stream, stream1);
+    }
+}
+
 template<typename T, int Headdim>
 void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr static int kBlockM = 64;  // Fixed for all head dimensions
@@ -175,11 +225,11 @@ void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream)
         TORCH_CHECK(params.d_v == 512);
         // Shared KV
         if (params.kvcache_quantization_type == 0) {
-            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
+            run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
         } else {
             KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
                 KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
-                    run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, true, SplitLength, quant_type0, quant_type1>>(params, stream);
+                    run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, true, SplitLength, quant_type0, quant_type1>>(params, stream);
                 });
             });
         }

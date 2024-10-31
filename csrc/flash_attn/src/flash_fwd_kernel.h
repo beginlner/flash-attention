@@ -1699,10 +1699,25 @@ __forceinline__ __device__ void compute_attn_splitkv(const Params &params) {
     if (Split == NoSplit) return;
     if constexpr (sizeof_bits_v<typename Kernel_traits::Element> == 8)
         flash::compute_attn_1rowblock_splitkv_fp8<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
-    else if constexpr (Kernel_traits::kHeadDim == 576 and Kernel_traits::Share_KV)
-        flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
     else
         flash::compute_attn_1rowblock_splitkv<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV, typename Params>
+__forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
+    const int m_block = blockIdx.x;
+    // The block index for the batch.
+    const int bidb = blockIdx.z / params.h;
+    // The block index for the head.
+    const int bidh = blockIdx.z - bidb * params.h;
+    const int n_split_idx = blockIdx.y;
+    const int num_n_splits = gridDim.y;
+    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
+    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
+    if (Split == NoSplit) return;
+    flash::compute_attn_1rowblock_splitkv<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
