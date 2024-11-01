@@ -27,59 +27,6 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Split, bool Is_local, typename Params>
-__forceinline__ __device__ void store_zero(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx) {
-    constexpr int kBlockM = Kernel_traits::kBlockM;
-    constexpr int kHeadDimV = Kernel_traits::kHeadDimV;
-    constexpr int kNThreadsS = Kernel_traits::kNThreadsS;
-    using Element = typename Kernel_traits::Element;
-    using ElementAccum = typename Kernel_traits::ElementAccum;
-    using index_t = typename Kernel_traits::index_t;
-
-    const int tidx = threadIdx.x;
-    const BlockInfo</*Varlen=*/true> binfo(params, bidb);
-
-    if (Split && !Is_local) { return; }
-    if (tidx >= kNThreadsS) {
-        return;
-    }
-    // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
-    // Otherwise we might read OOB elements from gK and gV,
-    // or get wrong results when we combine gOaccum from different blocks.
-    const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
-                                 + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
-    const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
-                                       + m_block * kBlockM) * params.d_v;
-    const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
-    using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
-    Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
-                                 Shape<Int<kBlockM>, Int<kHeadDimV>>{},
-                                 make_stride(Split ? kHeadDimV : params.o_row_stride, _1{}));
-    Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(Split ? params.softmax_lseaccum_ptr : params.softmax_lse_ptr) + row_offset_lseaccum),
-                                   Shape<Int<kBlockM>>{}, Stride<_1>{});
-
-    using GmemTiledCopyO = std::conditional_t<!Split, typename Kernel_traits::GmemTiledCopyO, typename Kernel_traits::GmemTiledCopyOaccum>;
-    GmemTiledCopyO gmem_tiled_copy_Oaccum;
-    auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
-    Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_D(gOaccum);
-    Tensor tOrOaccum = make_tensor<ElementO>(shape(tOgOaccum));
-    clear(tOrOaccum);
-    // Construct identity layout for sO
-    Tensor cO = make_identity_tensor(make_shape(size<0>(gOaccum), size<1>(gOaccum)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-    // Repeat the partitioning with identity layouts
-    Tensor tOcO = gmem_thr_copy_Oaccum.partition_D(cO);
-    Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgOaccum)));
-    // Clear_OOB_K must be false since we don't want to write zeros to gmem
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-            gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
-    );
-#pragma unroll
-    for (int m = 0; m < size<1>(tOgOaccum); ++m) {
-        const int row = get<0>(tOcO(0, m, 0));
-        if (row < binfo.actual_seqlen_q - m_block * kBlockM && get<1>(tOcO(0, m, 0)) == 0) { gLSEaccum(row) = Split ? -INFINITY : INFINITY; }
-    }
-}
-
 template<typename Kernel_traits, bool Split, typename Params, typename AccO, typename Softmax>
 __forceinline__ __device__ void store(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx,
                                       void* smem_, AccO acc_o, Softmax softmax) {
@@ -172,7 +119,7 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     );
 }
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split, typename Params>
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params>
 __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx) {
     static_assert(!Has_alibi);
     static_assert(Kernel_traits::Share_KV);
@@ -189,7 +136,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     constexpr int kNThreadsS = Kernel_traits::kNThreadsS;
     static_assert(kNThreads == 256 and kNThreadsS == 128);
     using Element = typename Kernel_traits::Element;
-    using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
 
     extern __shared__ char smem_[];
@@ -208,7 +154,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
     }
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
-        store_zero<Kernel_traits, Split, Is_local>(params, bidb, bidh, m_block, n_split_idx);
         return;
     }
     int n_block = n_block_max - 1;
@@ -502,10 +447,14 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         cute::copy(tRow_sumsRow_sum, softmax.row_sum);
     }
 
-    store<Kernel_traits, Split>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
+    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
+    if (NoSplit)
+        store<Kernel_traits, false>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
+    else
+        store<Kernel_traits, true>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
 }
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split, typename Params>
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params>
 __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int m_block = blockIdx.x;
     // The block index for the batch.
@@ -513,10 +462,12 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     // The block index for the head.
     const int bidh = blockIdx.z - bidb * params.h;
     const int n_split_idx = blockIdx.y;
+
     const BlockInfo</*Varlen=*/true> binfo(params, bidb);
-    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
-    if (Split == NoSplit) return;
-    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Split>(params, bidb, bidh, m_block, n_split_idx);
+    const int num_splits = cute::ceil_div(binfo.actual_seqlen_k, PARTITION_SIZE);
+    if (n_split_idx >= num_splits) return;
+
+    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -542,7 +493,7 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
     const int tidx = threadIdx.x;
     const int bidx = blockIdx.x;
 
-    // TODO: Assume Varlen
+    // TODO: Support Local Attention
     const BlockInfo</*Varlen=*/true> binfo(params, bidx * kBlockM / (params.h * params.seqlen_q));
     const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(binfo.actual_seqlen_k, PARTITION_SIZE));
     if (actual_num_splits == 1) return;
@@ -683,10 +634,10 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split>
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi>
 __global__ void __launch_bounds__(256, 1, 1)
 flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_params params) {
-    flash::compute_attn_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Split>(params);
+    flash::compute_attn_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params);
 }
 
 template<typename Kernel_traits, int kBlockM, int Log_max_splits>
@@ -701,25 +652,18 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_params pa
 template<typename Kernel_traits>
 void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
     TORCH_CHECK(!params.unpadded_lse);
-    if (extra_stream_ptr == nullptr) extra_stream_ptr = std::make_shared<cudaStream_t>(at::cuda::getStreamFromPool(true).stream());
-    auto stream1 = *extra_stream_ptr;
     size_t smem_size = Kernel_traits::kSmemSize;
     const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
     BOOL_SWITCH(params.is_causal, Is_causal, [&] {
         LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
+            TORCH_CHECK(!Is_local);
             ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
+                auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi>;
                 if (params.num_splits > 1) {
-                    // Launch the split kernel in another stream.
-                    wait_stream(stream1, stream);
-                    auto split_kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, true>;
                     smem_size = std::max(smem_size, size(typename Kernel_traits::SmemLayoutO{}) * sizeof(typename Kernel_traits::ElementAccum));
-                    C10_CUDA_CHECK(cudaFuncSetAttribute(split_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                    split_kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream1>>>(params);
-                    C10_CUDA_KERNEL_LAUNCH_CHECK();
                 }
-                auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false>;
                 C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                kernel<<<dim3(num_m_block, 1, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
+                kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
             });
         });
@@ -731,9 +675,8 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
         constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
         dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
         NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
-            flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream1>>>(params);
+            flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream>>>(params);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
-        wait_stream(stream, stream1);
     }
 }
