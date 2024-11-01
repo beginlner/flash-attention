@@ -24,11 +24,33 @@ namespace flash {
 
 using namespace cute;
 
+static constexpr int PagedBlockSize = 64;
+
+template <typename Kernel_traits>
+struct SharedStorageMLA {
+    union {
+        struct {
+            cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutQ>> smem_q;
+            cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutK> * 2> smem_k;  // Double buffer
+            cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutP>> smem_p;
+            cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_scale;
+            union {
+                struct {
+                    cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_max;
+                    cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_sum;
+                };
+                cute::array_aligned<int, PARTITION_SIZE / PagedBlockSize> smem_block_table;
+            };
+        };
+        cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutO>> smem_o;
+    };
+};
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Split, typename Params, typename AccO, typename Softmax>
+template<typename Kernel_traits, bool Split, typename Params, typename SharedStorage, typename AccO, typename Softmax>
 __forceinline__ __device__ void store(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx,
-                                      void* smem_, AccO acc_o, Softmax softmax) {
+                                      SharedStorage &shared_storage, AccO acc_o, Softmax softmax) {
     constexpr int kBlockM = Kernel_traits::kBlockM;
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kHeadDimV = Kernel_traits::kHeadDimV;
@@ -48,7 +70,7 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     // if (cute::thread0()) { print(lse); }
 
     using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
-    Tensor sOaccum = make_tensor(make_smem_ptr(reinterpret_cast<ElementO *>(smem_)), typename Kernel_traits::SmemLayoutO{}); // (SMEM_M,SMEM_N)
+    Tensor sOaccum = make_tensor(make_smem_ptr(reinterpret_cast<ElementO *>(shared_storage.smem_o.data())), typename Kernel_traits::SmemLayoutO{}); // (SMEM_M,SMEM_N)
     // Partition sO to match the accumulator partitioning
     using SmemTiledCopyO = std::conditional_t<
             !Split,
@@ -115,8 +137,8 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     );
 }
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params>
-__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int seqlen_k) {
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params, typename SharedStorage>
+__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int seqlen_k, SharedStorage &shared_storage) {
     static_assert(!Has_alibi);
     static_assert(Kernel_traits::Share_KV);
     static_assert(Kernel_traits::Blocked_KV);
@@ -133,8 +155,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     static_assert(kNThreads == 256 and kNThreadsS == 128);
     using Element = typename Kernel_traits::Element;
     using index_t = typename Kernel_traits::index_t;
-
-    extern __shared__ char smem_[];
 
     const int tidx = threadIdx.x;
     if (m_block * kBlockM >= params.seqlen_q) return;
@@ -153,18 +173,18 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     }
     int n_block = n_block_max - 1;
 
-    Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)), typename Kernel_traits::SmemLayoutQ{});
-    Tensor sK = make_tensor(sQ.data() + size(sQ), typename Kernel_traits::SmemLayoutK{});
-    Tensor sV = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutV{});
-    Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
+    Tensor sQ = make_tensor(make_smem_ptr(shared_storage.smem_q.data()), typename Kernel_traits::SmemLayoutQ{});
+    Tensor sK = make_tensor(make_smem_ptr(shared_storage.smem_k.data()), typename Kernel_traits::SmemLayoutK{});
+    Tensor sV = make_tensor(make_smem_ptr(shared_storage.smem_k.data()), typename Kernel_traits::SmemLayoutV{});
+    Tensor sVt = make_tensor(make_smem_ptr(shared_storage.smem_k.data()), typename Kernel_traits::SmemLayoutVtransposed{});
 
-    Tensor sP = make_tensor(sK.data() + 2 * size(sK), typename Kernel_traits::SmemLayoutP{});
+    Tensor sP = make_tensor(make_smem_ptr(shared_storage.smem_p.data()), typename Kernel_traits::SmemLayoutP{});
     Tensor tPsP = sP(_, tidx % kNThreadsS, _, _);
-    Tensor sScale_o = make_tensor(recast_ptr<float>(sP.data() + size(sP)), typename Kernel_traits::SmemLayoutRow{});
+    Tensor sScale_o = make_tensor(make_smem_ptr(shared_storage.smem_scale.data()), typename Kernel_traits::SmemLayoutRow{});
     Tensor tScale_osScale_o = sScale_o(_, tidx % kNThreadsS);
-    Tensor sRow_max = make_tensor(sScale_o.data() + size(sScale_o), typename Kernel_traits::SmemLayoutRow{});
+    Tensor sRow_max = make_tensor(make_smem_ptr(shared_storage.smem_max.data()), typename Kernel_traits::SmemLayoutRow{});
     Tensor tRow_maxsRow_max = sRow_max(_, tidx % kNThreadsS);
-    Tensor sRow_sum = make_tensor(sRow_max.data() + size(sRow_max), typename Kernel_traits::SmemLayoutRow{});
+    Tensor sRow_sum = make_tensor(make_smem_ptr(shared_storage.smem_sum.data()), typename Kernel_traits::SmemLayoutRow{});
     Tensor tRow_sumsRow_sum = sRow_sum(_, tidx % kNThreadsS);
 
     typename Kernel_traits::TiledMmaO tiled_mma_o;
@@ -254,7 +274,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
         {
             // Load block_table from global memory to shared memory
-            int *block_table_shared = reinterpret_cast<int *>(sScale_o.data().get().get() + size(sScale_o));
+            int *block_table_shared = reinterpret_cast<int *>(shared_storage.smem_block_table.data());
             for (int i = tidx - kNThreadsS; i <= n_block_max - n_block_min - 1; i += kNThreads - kNThreadsS) {
                 SM80_CP_ASYNC_CACHEALWAYS<int>::copy(block_table[i + n_block_min], block_table_shared[i]);
             }
@@ -436,9 +456,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
 
     const bool NoSplit = seqlen_k <= PARTITION_SIZE;
     if (NoSplit)
-        store<Kernel_traits, false>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
+        store<Kernel_traits, false>(params, bidb, bidh, m_block, n_split_idx, shared_storage, acc_o, softmax);
     else
-        store<Kernel_traits, true>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
+        store<Kernel_traits, true>(params, bidb, bidh, m_block, n_split_idx, shared_storage, acc_o, softmax);
 }
 
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params>
@@ -450,11 +470,14 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int bidh = blockIdx.z - bidb * params.h;
     const int n_split_idx = blockIdx.y;
 
+    extern __shared__ char shared_memory[];
+    auto &shared_storage = *reinterpret_cast<SharedStorageMLA<Kernel_traits>*>(shared_memory);
+
     const int seqlen_k = params.cu_seqlens_k[bidb];
     const int num_splits = cute::ceil_div(seqlen_k, PARTITION_SIZE);
     if (n_split_idx >= num_splits) return;
 
-    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx, seqlen_k);
+    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx, seqlen_k, shared_storage);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
