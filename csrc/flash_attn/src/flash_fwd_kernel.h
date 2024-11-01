@@ -10,7 +10,6 @@
 #include <cutlass/array.h>
 #include <cutlass/numeric_types.h>
 
-#include "named_barrier.h"
 #include "block_info.h"
 #include "kernel_traits.h"
 #include "utils.h"
