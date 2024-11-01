@@ -75,6 +75,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
                                            + m_block * kBlockM) * params.d_v;
         const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
+        using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
         Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
                                      Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                                      make_stride(Split ? kHeadDimV : params.o_row_stride, _1{}));
@@ -85,7 +86,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         GmemTiledCopyO gmem_tiled_copy_Oaccum;
         auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
         Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_D(gOaccum);
-        using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
         Tensor tOrOaccum = make_tensor<ElementO>(shape(tOgOaccum));
         clear(tOrOaccum);
         // Construct identity layout for sO
