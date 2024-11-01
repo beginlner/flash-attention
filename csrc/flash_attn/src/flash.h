@@ -23,17 +23,6 @@ constexpr int D_DIM = 2;
 #define PARTITION_SIZE 2048
 #endif
 
-extern std::shared_ptr<cudaStream_t> extra_stream_ptr;
-
-template<typename T>
-void wait_stream(const T &stream0, const T &stream1) {
-    cudaEvent_t event;
-    C10_CUDA_CHECK(cudaEventCreate(&event));
-    C10_CUDA_CHECK(cudaEventRecord(event, stream1));
-    C10_CUDA_CHECK(cudaStreamWaitEvent(stream0, event, 0));
-    C10_CUDA_CHECK(cudaEventDestroy(event));
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Qkv_params {
