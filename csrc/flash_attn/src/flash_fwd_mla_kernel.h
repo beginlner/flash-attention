@@ -116,7 +116,7 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
 }
 
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params>
-__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx) {
+__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int seqlen_k) {
     static_assert(!Has_alibi);
     static_assert(Kernel_traits::Share_KV);
     static_assert(Kernel_traits::Blocked_KV);
@@ -137,7 +137,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     extern __shared__ char smem_[];
 
     const int tidx = threadIdx.x;
-    const int seqlen_k = params.cu_seqlens_k[bidb];
     if (m_block * kBlockM >= params.seqlen_q) return;
 
     constexpr int n_blocks_per_split = PARTITION_SIZE / kBlockN;
@@ -463,7 +462,7 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int num_splits = cute::ceil_div(seqlen_k, PARTITION_SIZE);
     if (n_split_idx >= num_splits) return;
 
-    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx);
+    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx, seqlen_k);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
