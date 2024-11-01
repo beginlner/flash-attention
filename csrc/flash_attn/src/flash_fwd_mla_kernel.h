@@ -521,7 +521,6 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Split>(params, bidb, bidh, m_block, n_split_idx);
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, int kBlockM, int Log_max_splits, typename Params>
 __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &params) {
