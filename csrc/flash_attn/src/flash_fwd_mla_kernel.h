@@ -505,8 +505,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     store<Kernel_traits, Split>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split, typename Params>
 __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int m_block = blockIdx.x;
@@ -521,6 +519,7 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Split>(params, bidb, bidh, m_block, n_split_idx);
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits, int kBlockM, int Log_max_splits, typename Params>
 __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &params) {
@@ -696,6 +695,8 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_params pa
     static_assert(Log_max_splits >= 1);
     flash::combine_attn_seqk_parallel_mla<Kernel_traits, kBlockM, Log_max_splits>(params);
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits>
 void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
