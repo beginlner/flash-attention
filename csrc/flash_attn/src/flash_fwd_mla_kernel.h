@@ -15,7 +15,6 @@
 #include <cutlass/numeric_types.h>
 
 #include "named_barrier.h"
-#include "block_info.h"
 #include "kernel_traits.h"
 #include "utils.h"
 #include "softmax.h"
@@ -39,7 +38,6 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     using index_t = typename Kernel_traits::index_t;
 
     const int tidx = threadIdx.x;
-    const BlockInfo</*Varlen=*/true> binfo(params, bidb);
 
     typename Kernel_traits::TiledMmaO tiled_mma_o;
     auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
@@ -68,10 +66,8 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
 
     cute::copy(smem_tiled_copy_Oaccum, taccOrOaccum, taccOsOaccum);
 
-    const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
-                                 + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
-    const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
-                                       + m_block * kBlockM) * params.d_v;
+    const index_t row_offset_o = bidb * params.o_batch_stride + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
+    const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM) * params.d_v;
     const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
 
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
@@ -104,7 +100,7 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
 #pragma unroll
         for (int mi = 0; mi < size(lse); ++mi) {
             const int row = get<0>(taccOcO_row(mi));
-            if (row < binfo.actual_seqlen_q - m_block * kBlockM) { gLSEaccum(row) = lse(mi); }
+            if (row < params.seqlen_q - m_block * kBlockM) { gLSEaccum(row) = lse(mi); }
         }
     }
 
@@ -115,7 +111,7 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgOaccum)));
     // Clear_OOB_K must be false since we don't want to write zeros to gmem
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-            gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
+            gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, params.seqlen_q - m_block * kBlockM
     );
 }
 
@@ -141,17 +137,17 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     extern __shared__ char smem_[];
 
     const int tidx = threadIdx.x;
-    const BlockInfo</*Varlen=*/true> binfo(params, bidb);
-    if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
+    const int seqlen_k = params.cu_seqlens_k[bidb];
+    if (m_block * kBlockM >= params.seqlen_q) return;
 
     constexpr int n_blocks_per_split = PARTITION_SIZE / kBlockN;
     const int n_block_min = !Is_local
                             ? n_split_idx * n_blocks_per_split
-                            : std::max(n_split_idx * n_blocks_per_split, (m_block * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q - params.window_size_left) / kBlockN);
-    int n_block_max = std::min(cute::ceil_div(binfo.actual_seqlen_k, kBlockN), (n_split_idx + 1) * n_blocks_per_split);
+                            : std::max(n_split_idx * n_blocks_per_split, (m_block * kBlockM + seqlen_k - params.seqlen_q - params.window_size_left) / kBlockN);
+    int n_block_max = std::min(cute::ceil_div(seqlen_k, kBlockN), (n_split_idx + 1) * n_blocks_per_split);
     if (Is_causal || Is_local) {
         n_block_max = std::min(n_block_max,
-                               cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
+                               cute::ceil_div((m_block + 1) * kBlockM + seqlen_k - params.seqlen_q + params.window_size_right, kBlockN));
     }
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
         return;
@@ -189,7 +185,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
 
         const float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
-        flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
+        flash::Mask<Is_causal, Is_local, Has_alibi> mask(seqlen_k, params.seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
 
         if (n_block % 2 == 1) {
             // Double buffer for sK
@@ -272,7 +268,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         const int block_table_idx = (n_block_max - 1) * kBlockN / params.page_block_size;
         const int block_table_offset = (n_block_max - 1) * kBlockN - block_table_idx * params.page_block_size;
 
-        const index_t row_offset_q = binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb) + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
+        const index_t row_offset_q = bidb * params.q_batch_stride + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
         Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
                                 Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                 make_stride(params.q_row_stride, _1{}));
@@ -286,7 +282,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
 
         // We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
         flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true>(gmem_tiled_copy_Q, tQgQ, tQsQ, tQcQ, tQpQ,
-                                                              binfo.actual_seqlen_q - m_block * kBlockM);
+                                                              params.seqlen_q - m_block * kBlockM);
         cp_async_fence();
 
         flash::cp_async_wait<1>();  // Wait for block_table ready.
@@ -389,11 +385,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         // We need to clear the sK smem tiles because K is V.
         if (Kernel_traits::SplitLength == 0) {
             flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/true>(gmem_tiled_copy_K, tKgK, tKsK, tKcK, tKpK,
-                                                                                         binfo.actual_seqlen_k - n_block * kBlockN);
+                                                                                         seqlen_k - n_block * kBlockN);
         } else {
 #pragma unroll
             for (int n = 0; n < size<1>(tKsK); ++n) {
-                if (get<0>(tKcK(0, n, 0)) < binfo.actual_seqlen_k - n_block * kBlockN) {
+                if (get<0>(tKcK(0, n, 0)) < seqlen_k - n_block * kBlockN) {
                     LDG_K(n);
                     Cast_K(n);
                     STS_K(n);
@@ -447,7 +443,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         cute::copy(tRow_sumsRow_sum, softmax.row_sum);
     }
 
-    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
+    const bool NoSplit = seqlen_k <= PARTITION_SIZE;
     if (NoSplit)
         store<Kernel_traits, false>(params, bidb, bidh, m_block, n_split_idx, (void*)smem_, acc_o, softmax);
     else
@@ -463,8 +459,8 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int bidh = blockIdx.z - bidb * params.h;
     const int n_split_idx = blockIdx.y;
 
-    const BlockInfo</*Varlen=*/true> binfo(params, bidb);
-    const int num_splits = cute::ceil_div(binfo.actual_seqlen_k, PARTITION_SIZE);
+    const int seqlen_k = params.cu_seqlens_k[bidb];
+    const int num_splits = cute::ceil_div(seqlen_k, PARTITION_SIZE);
     if (n_split_idx >= num_splits) return;
 
     flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx);
@@ -494,8 +490,8 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
     const int bidx = blockIdx.x;
 
     // TODO: Support Local Attention
-    const BlockInfo</*Varlen=*/true> binfo(params, bidx * kBlockM / (params.h * params.seqlen_q));
-    const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(binfo.actual_seqlen_k, PARTITION_SIZE));
+    const int seqlen_k = params.cu_seqlens_k[bidx * kBlockM / (params.h * params.seqlen_q)];
+    const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(seqlen_k, PARTITION_SIZE));
     if (actual_num_splits == 1) return;
     const index_t row_offset_lse = bidx * kBlockM;
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
