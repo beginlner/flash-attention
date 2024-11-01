@@ -255,17 +255,12 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         {
             // Load block_table from global memory to shared memory
             int *block_table_shared = reinterpret_cast<int *>(sScale_o.data().get().get() + size(sScale_o));
-            int n_page_min = n_block_min * kBlockN / params.page_block_size;
-            int n_page_max = (n_block_max - 1) * kBlockN / params.page_block_size;
-            for (int i = tidx - kNThreadsS; i <= n_page_max - n_page_min; i += kNThreads - kNThreadsS) {
-                SM80_CP_ASYNC_CACHEALWAYS<int>::copy(block_table[i + n_page_min], block_table_shared[i]);
+            for (int i = tidx - kNThreadsS; i <= n_block_max - n_block_min - 1; i += kNThreads - kNThreadsS) {
+                SM80_CP_ASYNC_CACHEALWAYS<int>::copy(block_table[i + n_block_min], block_table_shared[i]);
             }
             cp_async_fence();
-            block_table = block_table_shared - n_page_min;
+            block_table = block_table_shared - n_block_min;
         }
-        // We move K and V to the last block.
-        const int block_table_idx = (n_block_max - 1) * kBlockN / params.page_block_size;
-        const int block_table_offset = (n_block_max - 1) * kBlockN - block_table_idx * params.page_block_size;
 
         const index_t row_offset_q = bidb * params.q_batch_stride + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
         Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
@@ -287,7 +282,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         flash::cp_async_wait<1>();  // Wait for block_table ready.
         cutlass::arch::NamedBarrier::sync(kNThreads - kNThreadsS, static_cast<int>(NamedBarriers::BlockTableReady));
 
-        const index_t row_offset_k = block_table[block_table_idx] * params.k_batch_stride + block_table_offset * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
+        // We move K and V to the last block.
+        const index_t row_offset_k = block_table[n_block_max - 1] * params.k_batch_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
         Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
                                 Shape<Int<kBlockN>, Int<kHeadDim>>{},
                                 make_stride(params.k_row_stride, _1{}));
@@ -349,11 +345,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         auto LoadK = [&](int n_block) {
             if (n_block <= n_block_min) { return; }
             // Advance gK
-            const int block_table_idx_cur = n_block * kBlockN / params.page_block_size;
-            const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size;
-            const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size;
-            const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size;
-            const index_t offset = (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
+            const index_t offset = (block_table[n_block - 1] - block_table[n_block]) * params.k_batch_stride;
 
             tKgK.data() = tKgK.data() + offset;
             tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset);
@@ -646,6 +638,7 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_params pa
 
 template<typename Kernel_traits>
 void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
+    TORCH_CHECK(params.page_block_size == Kernel_traits::kBlockN);
     TORCH_CHECK(!params.unpadded_lse);
     size_t smem_size = Kernel_traits::kSmemSize;
     const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
