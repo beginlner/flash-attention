@@ -27,12 +27,9 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV, typename Params>
-__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int num_n_splits) {
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split, typename Params>
+__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx) {
     static_assert(!Has_alibi);
-    static_assert(!Is_even_MN);
-    static_assert(Is_even_K);
-    static_assert(!Append_KV);
     static_assert(Kernel_traits::Share_KV);
     static_assert(Kernel_traits::Blocked_KV);
     static_assert(!Kernel_traits::QKCooperative);
@@ -154,9 +151,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         // We will have at least 1 "masking" iteration.
         // If not even_N, then seqlen_k might end in the middle of a block. In that case we need to
         // mask 2 blocks (e.g. when kBlockM == kBlockN), not just 1.
-        constexpr int n_masking_steps = (!Is_causal && !Is_local)
-                                        ? 1
-                                        : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
+        constexpr int n_masking_steps = (!Is_causal && !Is_local) ? 1 : cute::ceil_div(kBlockM, kBlockN) + 1;
 #pragma unroll 1
         for (int masking_step = n_masking_steps; n_block >= n_block_min; --masking_step, --n_block) {
             __syncthreads();
@@ -475,7 +470,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV, typename Params>
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split, typename Params>
 __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int m_block = blockIdx.x;
     // The block index for the batch.
@@ -483,16 +478,15 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     // The block index for the head.
     const int bidh = blockIdx.z - bidb * params.h;
     const int n_split_idx = blockIdx.y;
-    const int num_n_splits = gridDim.y;
-    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
+    const BlockInfo</*Varlen=*/true> binfo(params, bidb);
     const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
     if (Split == NoSplit) return;
-    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
+    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Split>(params, bidb, bidh, m_block, n_split_idx);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, int kBlockM, int Log_max_splits, bool Is_even_K, typename Params>
+template<typename Kernel_traits, int kBlockM, int Log_max_splits, typename Params>
 __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &params) {
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
@@ -602,13 +596,9 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
     // Repeat the partitioning with identity layouts
     Tensor tOcOaccum = gmem_thr_copy_Oaccum.partition_S(cOaccum);
     Tensor tOpOaccum = make_tensor<bool>(make_shape(size<2>(tOgOaccum)));
-    if (!Is_even_K) {
-#pragma unroll
-        for (int k = 0; k < size(tOpOaccum); ++k) { tOpOaccum(k) = get<1>(tOcOaccum(0, 0, k)) < params.d; }
-    }
     // Load Oaccum in then scale and accumulate to O
     for (int split = 0; split < actual_num_splits; ++split) {
-        flash::copy</*Is_even_MN=*/false, Is_even_K>(
+        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true>(
                 gmem_tiled_copy_Oaccum, tOgOaccum, tOrOaccum, tOcOaccum, tOpOaccum, params.b * params.h * params.seqlen_q - bidx * kBlockM
         );
 #pragma unroll
@@ -642,15 +632,13 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
                          + head_idx * params.o_head_stride + row * params.o_row_stride;
 #pragma unroll
             for (int k = 0; k < size<2>(rO); ++k) {
-                if (Is_even_K || tOpOaccum(k)) {
-                    const int col = get<1>(tOcOaccum(0, m, k));
-                    Tensor gO = make_tensor(make_gmem_ptr(o_ptr + col),
-                    Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
-                    // TODO: Should check if this is using vectorized store, but it seems pretty fast
-                    copy(rO(_, m, k), gO);
-                    // if (bidx == 0 && tidx == 0) { printf("tidx = %d, idx = %d, batch_idx = %d, head_idx = %d, row = %d, col = %d\n", tidx, idx, batch_idx, head_idx, row, col); print(rO(_, m, k)); print(gO); }
-                    // reinterpret_cast<uint64_t *>(o_ptr)[col / 4] = recast<uint64_t>(rO)(0, m, k);
-                }
+                const int col = get<1>(tOcOaccum(0, m, k));
+                Tensor gO = make_tensor(make_gmem_ptr(o_ptr + col),
+                Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
+                // TODO: Should check if this is using vectorized store, but it seems pretty fast
+                copy(rO(_, m, k), gO);
+                // if (bidx == 0 && tidx == 0) { printf("tidx = %d, idx = %d, batch_idx = %d, head_idx = %d, row = %d, col = %d\n", tidx, idx, batch_idx, head_idx, row, col); print(rO(_, m, k)); print(gO); }
+                // reinterpret_cast<uint64_t *>(o_ptr)[col / 4] = recast<uint64_t>(rO)(0, m, k);
             }
         }
     }
@@ -660,17 +648,17 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Split, bool Append_KV>
+template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Split>
 __global__ void __launch_bounds__(256, 1, 1)
 flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_params params) {
-    flash::compute_attn_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params);
+    flash::compute_attn_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi, Split>(params);
 }
 
-template<typename Kernel_traits, int kBlockM, int Log_max_splits, bool Is_even_K>
+template<typename Kernel_traits, int kBlockM, int Log_max_splits>
 __global__ void __launch_bounds__(256, 1, 1)
 flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_params params) {
     static_assert(Log_max_splits >= 1);
-    flash::combine_attn_seqk_parallel_mla<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
+    flash::combine_attn_seqk_parallel_mla<Kernel_traits, kBlockM, Log_max_splits>(params);
 }
 
 template<typename Kernel_traits>
@@ -686,13 +674,13 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
                 if (params.num_splits > 1) {
                     // Launch the split kernel in another stream.
                     wait_stream(stream1, stream);
-                    auto split_kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, true, false>;
+                    auto split_kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, true>;
                     smem_size = std::max(smem_size, size(typename Kernel_traits::SmemLayoutO{}) * sizeof(typename Kernel_traits::ElementAccum));
                     C10_CUDA_CHECK(cudaFuncSetAttribute(split_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                     split_kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream1>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                 }
-                auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false, true, false, false>;
+                auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, false>;
                 C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 kernel<<<dim3(num_m_block, 1, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -705,11 +693,9 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
         // If headdim is divisible by 64, then we set kBlockM = 8, etc.
         constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
         dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
-        EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
-            NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
-                flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
-                C10_CUDA_KERNEL_LAUNCH_CHECK();
-            });
+        NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
+            flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream1>>>(params);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
         wait_stream(stream, stream1);
     }
