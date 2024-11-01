@@ -46,8 +46,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
-    using GmemTiledCopyO = std::conditional_t<!Split, typename Kernel_traits::GmemTiledCopyO, typename Kernel_traits::GmemTiledCopyOaccum>;
-    using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
 
     extern __shared__ char smem_[];
 
@@ -83,9 +81,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(Split ? params.softmax_lseaccum_ptr : params.softmax_lse_ptr) + row_offset_lseaccum),
                                        Shape<Int<kBlockM>>{}, Stride<_1>{});
 
+        using GmemTiledCopyO = std::conditional_t<!Split, typename Kernel_traits::GmemTiledCopyO, typename Kernel_traits::GmemTiledCopyOaccum>;
         GmemTiledCopyO gmem_tiled_copy_Oaccum;
         auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
         Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_D(gOaccum);
+        using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
         Tensor tOrOaccum = make_tensor<ElementO>(shape(tOgOaccum));
         clear(tOrOaccum);
         // Construct identity layout for sO
@@ -400,6 +400,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     Tensor lse = softmax.template normalize_softmax_lse</*Is_dropout=*/false, Split>(acc_o, params.scale_softmax);
     // if (cute::thread0()) { print(lse); }
 
+    using ElementO = std::conditional_t<!Split, Element, ElementAccum>;
     Tensor sOaccum = make_tensor(make_smem_ptr(reinterpret_cast<ElementO *>(smem_)), typename Kernel_traits::SmemLayoutO{}); // (SMEM_M,SMEM_N)
     // Partition sO to match the accumulator partitioning
     using SmemTiledCopyO = std::conditional_t<
@@ -431,6 +432,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
                                    Shape<Int<kBlockM>>{}, Stride<_1>{});
     // if (tidx == 0) { printf("row_offset_o = %d, bidh = %d, gOaccum = %p\n", row_offset_o, bidh, gOaccum.data()); }
 
+    using GmemTiledCopyO = std::conditional_t<!Split, typename Kernel_traits::GmemTiledCopyO, typename Kernel_traits::GmemTiledCopyOaccum>;
     GmemTiledCopyO gmem_tiled_copy_Oaccum;
     auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
     Tensor tOsOaccum = gmem_thr_copy_Oaccum.partition_S(sOaccum);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
