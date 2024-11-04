@@ -248,9 +248,8 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     );
 }
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params, typename SharedStorage>
+template<typename Kernel_traits, typename Params, typename SharedStorage>
 __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int seqlen_k, SharedStorage &shared_storage) {
-    static_assert(!Has_alibi);
     static_assert(Kernel_traits::Share_KV);
     static_assert(Kernel_traits::Blocked_KV);
     static_assert(!Kernel_traits::QKCooperative);
@@ -271,17 +270,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     if (m_block * kBlockM >= params.seqlen_q) return;
 
     constexpr int n_blocks_per_split = PARTITION_SIZE / kBlockN;
-    const int n_block_min = !Is_local
-                            ? n_split_idx * n_blocks_per_split
-                            : std::max(n_split_idx * n_blocks_per_split, (m_block * kBlockM + seqlen_k - params.seqlen_q - params.window_size_left) / kBlockN);
+    const int n_block_min = n_split_idx * n_blocks_per_split;
     int n_block_max = std::min(cute::ceil_div(seqlen_k, kBlockN), (n_split_idx + 1) * n_blocks_per_split);
-    if (Is_causal || Is_local) {
-        n_block_max = std::min(n_block_max,
-                               cute::ceil_div((m_block + 1) * kBlockM + seqlen_k - params.seqlen_q + params.window_size_right, kBlockN));
-    }
-    if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
-        return;
-    }
+    if (n_block_min >= n_block_max) return;
     int n_block = n_block_max - 1;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.smem_q.data()), typename Kernel_traits::SmemLayoutQ{});
@@ -314,8 +305,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
         Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
 
-        const float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
-        flash::Mask<Is_causal, Is_local, Has_alibi> mask(seqlen_k, params.seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
+        flash::Mask</*Is_causal=*/false, /*Is_local=*/false, /*Has_alibi*/false> mask(seqlen_k, params.seqlen_q, params.window_size_left, params.window_size_right, 0.0f);
 
         if (n_block % 2 == 1) {
             // Double buffer for sK
@@ -329,7 +319,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         // We will have at least 1 "masking" iteration.
         // If not even_N, then seqlen_k might end in the middle of a block. In that case we need to
         // mask 2 blocks (e.g. when kBlockM == kBlockN), not just 1.
-        constexpr int n_masking_steps = (!Is_causal && !Is_local) ? 1 : cute::ceil_div(kBlockM, kBlockN) + 1;
+        constexpr int n_masking_steps = 1;
 #pragma unroll 1
         for (int masking_step = n_masking_steps; n_block >= n_block_min; --masking_step, --n_block) {
             __syncthreads();
@@ -343,7 +333,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
 
             int warp_idx = cutlass::canonical_warp_idx_sync();
             if (is_masking_step) {
-                mask.template apply_mask<Is_causal, /*Is_even_MN*/false>(
+                mask.template apply_mask</*Is_causal=*/false, /*Is_even_MN*/false>(
                         acc_s, n_block * kBlockN, m_block * kBlockM + warp_idx * 16 + (tidx % 32) / 4, kNWarpsS * 16
                 );
             } else {
@@ -357,7 +347,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
                              ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/true, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2)
                              : is_masking_step ?
                                softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/true, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2)
-                                               : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2);
+                                               : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*//*Is_local=*/false, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2);
 
             Tensor rP = make_tensor<Element>(acc_s.layout());
             cute::copy(flash::convert_type<Element>(acc_s), rP);
@@ -573,7 +563,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         store<Kernel_traits, true>(params, bidb, bidh, m_block, n_split_idx, shared_storage, acc_o, softmax);
 }
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, typename Params>
+template<typename Kernel_traits, typename Params>
 __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int m_block = blockIdx.x;
     // The block index for the batch.
@@ -589,7 +579,7 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
     const int num_splits = cute::ceil_div(seqlen_k, PARTITION_SIZE);
     if (n_split_idx >= num_splits) return;
 
-    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params, bidb, bidh, m_block, n_split_idx, seqlen_k, shared_storage);
+    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits>(params, bidb, bidh, m_block, n_split_idx, seqlen_k, shared_storage);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -615,7 +605,6 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
     const int tidx = threadIdx.x;
     const int bidx = blockIdx.x;
 
-    // TODO: Support Local Attention
     const int seqlen_k = params.cu_seqlens_k[bidx * kBlockM / (params.h * params.seqlen_q)];
     const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(seqlen_k, PARTITION_SIZE));
     if (actual_num_splits == 1) return;
@@ -756,10 +745,10 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi>
+template<typename Kernel_traits>
 __global__ void __launch_bounds__(256, 1, 1)
 flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_params params) {
-    flash::compute_attn_splitkv_mla<Kernel_traits, Is_causal, Is_local, Has_alibi>(params);
+    flash::compute_attn_splitkv_mla<Kernel_traits>(params);
 }
 
 template<typename Kernel_traits, int kBlockM, int Log_max_splits>
@@ -775,19 +764,15 @@ template<typename Kernel_traits>
 void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
     TORCH_CHECK(params.page_block_size == Kernel_traits::kBlockN);
     TORCH_CHECK(!params.unpadded_lse);
+    TORCH_CHECK(!params.is_causal);
+    TORCH_CHECK(!(params.window_size_left >= 0 || params.window_size_right >= 0));
+    TORCH_CHECK(params.alibi_slopes_ptr == nullptr);
     const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
-    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-        LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
-            TORCH_CHECK(!Is_local);
-            ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
-                auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi>;
-                constexpr size_t smem_size = sizeof(flash::SharedStorageMLA<Kernel_traits>);
-                C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
-                C10_CUDA_KERNEL_LAUNCH_CHECK();
-            });
-        });
-    });
+    auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits>;
+    constexpr size_t smem_size = sizeof(flash::SharedStorageMLA<Kernel_traits>);
+    C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (params.num_splits > 1) {
         // We want kBlockM to be as small as possible for more parallelism.
         // With 128 threads we can load 512 elements at a time, so if headdim is divisible by 128, kBlockM = 4.
