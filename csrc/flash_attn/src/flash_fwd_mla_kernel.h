@@ -344,13 +344,14 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
             const bool is_masking_step = masking_step > 0;
             const bool is_first_masking_step = masking_step == n_masking_steps;
 
+            int warp_idx = cutlass::canonical_warp_idx_sync();
             if (is_masking_step) {
                 mask.template apply_mask<Is_causal, /*Is_even_MN*/false>(
-                        acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarpsS * 16
+                        acc_s, n_block * kBlockN, m_block * kBlockM + warp_idx * 16 + (tidx % 32) / 4, kNWarpsS * 16
                 );
             } else {
                 mask.template apply_mask</*Causal_mask=*/false, /*Is_even_MN*/true>(
-                        acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarpsS * 16
+                        acc_s, n_block * kBlockN, m_block * kBlockM + warp_idx * 16 + (tidx % 32) / 4, kNWarpsS * 16
                 );
             }
 
