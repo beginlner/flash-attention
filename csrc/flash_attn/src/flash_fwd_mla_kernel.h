@@ -89,29 +89,13 @@ struct Flash_fwd_kernel_traits_mla {
     using Gmem_copy_struct = SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>;
     static constexpr int kNThreadsLoad = kNThreads - kNThreadsS;
     static_assert(kNThreadsLoad % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
+
     using GmemLayoutAtom = Layout<Shape<Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopy = decltype(make_tiled_copy(
             Copy_Atom<Gmem_copy_struct, Element>{},
             GmemLayoutAtom{},
             Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
-
-    static constexpr int SplitLength = SplitLength_;
-    static_assert(SplitLength % kBlockKSmem == 0);
-    using KV_type0 = std::conditional_t<(SplitLength > 0), KV_type0_, Element>;
-    using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;;
-    using GmemTiledCopyKQuant0 = decltype(make_tiled_copy(
-            Copy_Atom<DefaultCopy, KV_type0>{},
-            GmemLayoutAtom{},
-            Layout<Shape<_1, _8>>{}));
-    using GmemTiledCopyKQuant1 = decltype(make_tiled_copy(
-            Copy_Atom<std::conditional_t<std::is_same_v<KV_type1, Element>, Gmem_copy_struct, DefaultCopy>, KV_type1>{},
-            GmemLayoutAtom{},
-            Layout<Shape<_1, _8>>{}));
-    using SmemTiledCopyK = decltype(make_tiled_copy(
-            Copy_Atom<DefaultCopy, Element>{},
-            GmemLayoutAtom{},
-            Layout<Shape<_1, _8>>{}));
 
     using GmemLayoutAtomO = Layout<
             Shape<Int<kNThreadsS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
@@ -130,6 +114,23 @@ struct Flash_fwd_kernel_traits_mla {
             Copy_Atom<DefaultCopy, ElementAccum>{},
             GmemLayoutAtomOaccum{},
             Layout<Shape<_1, _4>>{}));  // Val layout, 4 vals per store
+
+    static constexpr int SplitLength = SplitLength_;
+    static_assert(SplitLength % kBlockKSmem == 0);
+    using KV_type0 = std::conditional_t<(SplitLength > 0), KV_type0_, Element>;
+    using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;;
+    using GmemTiledCopyKQuant0 = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, KV_type0>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));
+    using GmemTiledCopyKQuant1 = decltype(make_tiled_copy(
+            Copy_Atom<std::conditional_t<std::is_same_v<KV_type1, Element>, Gmem_copy_struct, DefaultCopy>, KV_type1>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));
+    using SmemTiledCopyK = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, Element>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));
 };
 
 namespace flash {
