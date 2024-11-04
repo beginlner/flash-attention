@@ -1413,3 +1413,36 @@ def flash_attn_with_blocked_kvcache(
         num_splits,
     )
     return out if not return_softmax_lse else (out, softmax_lse)
+
+
+def flash_attn_with_blocked_kvcache_mla(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    head_size_v: int,
+    tile_scheduler_metadata: torch.Tensor,
+    num_splits: torch.Tensor,
+    kvcache_quantization_dtypes: Optional[Tuple[str, str]] = None,
+    kvcache_quantization_split_length: int = 0,
+    out: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    return_softmax_lse: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    kvcache_quantization_type = convert_kvcache_quantization_type(kvcache_quantization_dtypes)
+    out, softmax_lse = flash_attn_cuda.fwd_kvcache_mla(
+        q,
+        k_cache,
+        head_size_v,
+        kvcache_quantization_type,
+        kvcache_quantization_split_length,
+        cache_seqlens,
+        block_table,
+        out,
+        softmax_scale,
+        tile_scheduler_metadata,
+        num_splits,
+    )
+    return out if not return_softmax_lse else (out, softmax_lse)

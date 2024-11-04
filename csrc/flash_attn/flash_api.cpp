@@ -12,6 +12,7 @@
 #include <cute/numeric/int.hpp>
 
 #include "flash.h"
+#include "flash_mla.h"
 #include "static_switch.h"
 
 #ifndef TORCH_EXTENSION_NAME
@@ -1586,6 +1587,166 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     return {out, softmax_lse};
 }
 
+std::vector<at::Tensor>
+mha_fwd_kvcache_mla(
+        at::Tensor &q,                               // batch_size x seqlen_q x num_heads x head_size
+        const at::Tensor &kcache,                    // num_blocks x page_block_size x num_heads_k x head_size
+        const int head_size_v,
+        const int kvcache_quantization_type,         // 0 for no quantization; 1 for int4 + int8
+        const int kvcache_quantization_split_length,
+        const at::Tensor &seqlens_k,                 // batch_size
+        at::Tensor &block_table,                     // batch_size x max_num_blocks_per_seq
+        c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size_v
+        const float softmax_scale,
+        at::Tensor &tile_scheduler_metadata,         // num_sm_parts x TileSchedulerMetaDataSize
+        at::Tensor &num_splits                       // batch_size / nextn
+) {
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+    TORCH_CHECK(is_sm90);
+
+    auto q_dtype = q.dtype();
+    TORCH_CHECK(q_dtype == torch::kBFloat16);
+    if (kvcache_quantization_type == 0) {
+        TORCH_CHECK(kcache.dtype() == q_dtype, "query and key must have the same dtype");
+        TORCH_CHECK(kvcache_quantization_split_length == 0);
+    }
+
+    CHECK_DEVICE(q); CHECK_DEVICE(kcache);
+
+    TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(kcache.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+
+    CHECK_DEVICE(block_table);
+    TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
+    TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
+
+    const auto sizes = q.sizes();
+    const int batch_size = sizes[0];
+    int seqlen_q = sizes[1];
+    int num_heads = sizes[2];
+    const int head_size = sizes[3];
+    TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
+    TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
+    TORCH_CHECK(head_size == 576 && head_size_v == 512);
+
+    const int max_num_blocks_per_seq = block_table.size(1);
+    const int num_blocks = kcache.size(0);
+    const int page_block_size = kcache.size(1);
+    const int seqlen_k = max_num_blocks_per_seq * page_block_size;
+    const int num_heads_k = kcache.size(2);
+    const int batch_size_c = batch_size;
+    TORCH_CHECK(batch_size > 0, "batch size must be postive");
+    TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
+
+    // Faster to transpose q from (b, 1, (nheads_kv ngroups), d) to (b, ngroups, nheads_kv, d) in this case
+    // H/t Daniel Haziza
+    const int seqlenq_ngroups_swapped = seqlen_q == 1 && num_heads > num_heads_k;
+    const int ngroups = num_heads / num_heads_k;
+    if (seqlenq_ngroups_swapped) {
+        q = q.reshape({batch_size, num_heads_k, ngroups, head_size}).transpose(1, 2);
+        seqlen_q = ngroups;
+        num_heads = num_heads_k;
+    }
+
+    int head_size_k = head_size;
+    if (kvcache_quantization_type > 0) {
+        TORCH_CHECK(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
+        TORCH_CHECK(kcache.dtype() == torch::kInt32, "kcache must have dtype torch.int32 in quantization.");
+        KVCACHE_QUANTIZATION_TYPE_SWITCH(kvcache_quantization_type, [&] {
+            head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
+                           (head_size - kvcache_quantization_split_length) * cute::sizeof_bits<quant_type1>::value) / 32;
+        });
+    }
+
+    CHECK_SHAPE(q, batch_size, seqlen_q, num_heads, head_size);
+    CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size_k);
+    CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
+
+    at::Tensor out;
+    if (out_.has_value()) {
+        out = out_.value();
+        TORCH_CHECK(out.dtype() == q_dtype, "Output must have the same dtype as inputs");
+        CHECK_DEVICE(out);
+        TORCH_CHECK(out.stride(-1) == 1, "Output tensor must have contiguous last dimension");
+        CHECK_SHAPE(out, batch_size, sizes[1], sizes[2], head_size_v);
+        if (seqlenq_ngroups_swapped) {
+            out = out.reshape({batch_size, num_heads_k, ngroups, head_size_v}).transpose(1, 2);
+        }
+    } else {
+        out = torch::empty({batch_size, seqlen_q, num_heads, head_size_v}, q.options());
+    }
+
+    TORCH_CHECK(seqlens_k.dtype() == torch::kInt32, "seqlens_k must have dtype int32");
+    CHECK_DEVICE(seqlens_k);
+    CHECK_CONTIGUOUS(seqlens_k);
+    CHECK_SHAPE(seqlens_k, batch_size);
+
+    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
+
+    auto opts = q.options();
+    auto softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
+
+    Flash_fwd_mla_params params = {};
+    // Set the sizes.
+    params.b = batch_size;
+    params.seqlen_q = seqlen_q;
+    params.cu_seqlens_k = seqlens_k.data_ptr<int>();
+    params.h = num_heads;
+    params.h_h_k_ratio = num_heads / num_heads_k;
+    params.d = head_size;
+    params.d_v = head_size_v;
+    params.scale_softmax = softmax_scale;
+    params.scale_softmax_log2 = float(softmax_scale * M_LOG2E);
+    // Set the pointers and strides.
+    params.q_ptr = q.data_ptr();
+    params.k_ptr = kcache.data_ptr();
+    params.o_ptr = out.data_ptr();
+    params.softmax_lse_ptr = softmax_lse.data_ptr();
+    // All stride are in elements, not bytes.
+    params.q_batch_stride = q.stride(0);
+    params.k_batch_stride = kcache.stride(0);
+    params.o_batch_stride = out.stride(0);
+    params.q_row_stride = q.stride(-3);
+    params.k_row_stride = kcache.stride(-3);
+    params.o_row_stride = out.stride(-3);
+    params.q_head_stride = q.stride(-2);
+    params.k_head_stride = kcache.stride(-2);
+    params.o_head_stride = out.stride(-2);
+
+    params.block_table = block_table.data_ptr<int>();
+    params.block_table_batch_stride = block_table.stride(0);
+    params.page_block_size = page_block_size;
+
+    TORCH_CHECK(tile_scheduler_metadata.dtype() == torch::kInt32, "tile_scheduler_metadata must have dtype int32");
+    TORCH_CHECK(tile_scheduler_metadata.size(1) == TileSchedulerMetaDataSize);
+    CHECK_DEVICE(tile_scheduler_metadata);
+    CHECK_CONTIGUOUS(tile_scheduler_metadata);
+    params.tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
+    params.num_sm_parts = tile_scheduler_metadata.size(0);
+    TORCH_CHECK(num_splits.dtype() == torch::kInt32, "num_splits must have dtype int32");
+    CHECK_DEVICE(num_splits);
+    CHECK_CONTIGUOUS(num_splits);
+    params.num_splits_ptr = num_splits.data_ptr<int>();
+
+    at::Tensor softmax_lse_accum = torch::empty({params.num_sm_parts, batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
+    at::Tensor out_accum = torch::empty({params.num_sm_parts, batch_size, num_heads, seqlen_q, head_size_v}, opts.dtype(at::kFloat));
+    params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
+    params.oaccum_ptr = out_accum.data_ptr();
+
+    params.kvcache_quantization_type = kvcache_quantization_type;
+    params.kvcache_quantization_split_length = kvcache_quantization_split_length;
+
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    run_mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576>(params, stream);
+
+    if (seqlenq_ngroups_swapped) {
+        out = out.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, head_size_v});
+        softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * seqlen_q, 1});
+    }
+    return {out, softmax_lse};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "FlashAttention";
     m.def("fwd", &mha_fwd, "Forward pass");
@@ -1593,4 +1754,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("varlen_bwd", &mha_varlen_bwd, "Backward pass (variable length)");
     m.def("fwd_kvcache", &mha_fwd_kvcache, "Forward pass, with KV-cache");
+    m.def("fwd_kvcache_mla", &mha_fwd_kvcache_mla, "MLA inference, with KV-cache");
 }

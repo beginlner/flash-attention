@@ -197,6 +197,7 @@ if not SKIP_CUDA_BUILD:
                 "csrc/flash_attn/src/flash_fwd_hdim128_fp8.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim128_fp8.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim576_fp8.cu",
+                "csrc/flash_attn/src/flash_fwd_split_mla_bf16_sm90.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17", "-DNDEBUG", "-Wno-deprecated-declarations"] + generator_flag + fast_build_flag,

@@ -1,7 +1,3 @@
-/******************************************************************************
- * Copyright (c) 2024, Tri Dao.
- ******************************************************************************/
-
 #pragma once
 
 #ifdef __CLION_IDE__
@@ -14,11 +10,29 @@
 #include <cutlass/array.h>
 #include <cutlass/numeric_types.h>
 
+using namespace cute;
+
 #include "named_barrier.h"
-#include "kernel_traits.h"
+#include "block_info.h"
 #include "utils.h"
 #include "softmax.h"
 #include "mask.h"
+#include "static_switch.h"
+#include "flash_mla.h"
+
+
+template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayoutK() {
+    constexpr int headSizeBytes = sizeof(PrecType) * DIM;
+    constexpr int headSizeBytes2 = sizeof(PrecType) * DIM2;
+
+    if constexpr (headSizeBytes % 128 == 0 && headSizeBytes2 % 128 == 0) {
+        return GMMA::Layout_K_SW128_Atom<PrecType>{};
+    } else if constexpr (headSizeBytes % 64 == 0 && headSizeBytes2 % 64 == 0) {
+        return GMMA::Layout_K_SW64_Atom<PrecType>{};
+    } else {
+        return GMMA::Layout_K_SW32_Atom<PrecType>{};
+    }
+}
 
 template<int kHeadDim_, int kBlockM_, int kBlockN_, typename elem_type=cutlass::bfloat16_t,
         int kHeadDimV_=0,
@@ -138,7 +152,7 @@ namespace flash {
 
 using namespace cute;
 
-static constexpr int PagedBlockSize = 64;
+static constexpr int MaxNumPagesPerBlock = 256;
 
 template <typename Kernel_traits>
 struct SharedStorageMLA {
@@ -148,7 +162,7 @@ struct SharedStorageMLA {
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutK> * 2> smem_k;  // Double buffer
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutP>> smem_p;
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_scale;
-            cute::array_aligned<int, PARTITION_SIZE / PagedBlockSize> smem_block_table;
+            cute::array_aligned<int, MaxNumPagesPerBlock> smem_block_table;
         };
         struct {
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_max;
@@ -160,11 +174,10 @@ struct SharedStorageMLA {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Split, typename Params, typename SharedStorage, typename AccO, typename Softmax>
-__forceinline__ __device__ void store(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx,
+template<typename Kernel_traits, bool Split, typename SharedStorage, typename AccO, typename Softmax>
+__forceinline__ __device__ void store(const Flash_fwd_mla_params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx,
                                       SharedStorage &shared_storage, AccO acc_o, Softmax softmax) {
     constexpr int kBlockM = Kernel_traits::kBlockM;
-    constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kHeadDimV = Kernel_traits::kHeadDimV;
     constexpr int kNThreadsS = Kernel_traits::kNThreadsS;
     using Element = typename Kernel_traits::Element;
@@ -248,8 +261,12 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     );
 }
 
-template<typename Kernel_traits, typename Params, typename SharedStorage>
-__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int seqlen_k, SharedStorage &shared_storage) {
+template<typename Kernel_traits, typename SharedStorage>
+__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_fwd_mla_params &params,
+                                                                   const int bidb, const int bidh, const int m_block,
+                                                                   const int n_split_idx, const int seqlen_k,
+                                                                   const int n_block_min, const int n_block_max, const bool NoSplit,
+                                                                   SharedStorage &shared_storage) {
     static_assert(Kernel_traits::Share_KV);
     static_assert(Kernel_traits::Blocked_KV);
     static_assert(!Kernel_traits::QKCooperative);
@@ -269,10 +286,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
     const int tidx = threadIdx.x;
     if (m_block * kBlockM >= params.seqlen_q) return;
 
-    constexpr int n_blocks_per_split = PARTITION_SIZE / kBlockN;
-    const int n_block_min = n_split_idx * n_blocks_per_split;
-    int n_block_max = std::min(cute::ceil_div(seqlen_k, kBlockN), (n_split_idx + 1) * n_blocks_per_split);
-    if (n_block_min >= n_block_max) return;
     int n_block = n_block_max - 1;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.smem_q.data()), typename Kernel_traits::SmemLayoutQ{});
@@ -305,7 +318,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
         Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
 
-        flash::Mask</*Is_causal=*/false, /*Is_local=*/false, /*Has_alibi*/false> mask(seqlen_k, params.seqlen_q, params.window_size_left, params.window_size_right, 0.0f);
+        flash::Mask</*Is_causal=*/false, /*Is_local=*/false, /*Has_alibi*/false> mask(seqlen_k, params.seqlen_q, -1, -1, 0.0f);
 
         if (n_block % 2 == 1) {
             // Double buffer for sK
@@ -556,36 +569,49 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         cute::copy(tRow_sumsRow_sum, softmax.row_sum);
     }
 
-    const bool NoSplit = seqlen_k <= PARTITION_SIZE;
     if (NoSplit)
         store<Kernel_traits, false>(params, bidb, bidh, m_block, n_split_idx, shared_storage, acc_o, softmax);
     else
         store<Kernel_traits, true>(params, bidb, bidh, m_block, n_split_idx, shared_storage, acc_o, softmax);
 }
 
-template<typename Kernel_traits, typename Params>
-__forceinline__ __device__ void compute_attn_splitkv_mla(const Params &params) {
+template<typename Kernel_traits>
+__forceinline__ __device__ void compute_attn_splitkv_mla(const Flash_fwd_mla_params &params) {
+    constexpr int kBlockN = Kernel_traits::kBlockN;
     const int m_block = blockIdx.x;
-    // The block index for the batch.
-    const int bidb = blockIdx.z / params.h;
-    // The block index for the head.
-    const int bidh = blockIdx.z - bidb * params.h;
-    const int n_split_idx = blockIdx.y;
+    const int bidh = blockIdx.y;
+    const int partition_idx = blockIdx.z;
 
     extern __shared__ char shared_memory[];
-    auto &shared_storage = *reinterpret_cast<SharedStorageMLA<Kernel_traits>*>(shared_memory);
+    auto &shared_storage = *reinterpret_cast<SharedStorageMLA<Kernel_traits> *>(shared_memory);
 
-    const int seqlen_k = params.cu_seqlens_k[bidb];
-    const int num_splits = cute::ceil_div(seqlen_k, PARTITION_SIZE);
-    if (n_split_idx >= num_splits) return;
+    int* tile_scheduler_metadata_ptr = params.tile_scheduler_metadata_ptr + partition_idx * TileSchedulerMetaDataSize;
+    int4 tile_scheduler_metadata = reinterpret_cast<int4 *>(tile_scheduler_metadata_ptr)[0];
+    int begin_idx = tile_scheduler_metadata.x;
+    int begin_seqlen = tile_scheduler_metadata.y;
+    int end_idx = tile_scheduler_metadata.z;
+    int end_seqlen = tile_scheduler_metadata.w;
+    if (begin_idx < 0) return;
+    int begin_n_split_idx = tile_scheduler_metadata_ptr[4];
 
-    flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits>(params, bidb, bidh, m_block, n_split_idx, seqlen_k, shared_storage);
+    #pragma unroll 1
+    for (int batch_id = begin_idx; batch_id <= end_idx; ++batch_id) {
+        const int n_split_idx = batch_id == begin_idx ? begin_n_split_idx : 0;
+        const int seqlen_k = params.cu_seqlens_k[batch_id];
+        const int n_block_min = batch_id == begin_idx ? begin_seqlen / kBlockN : 0;
+        const int n_block_max = batch_id == end_idx ? end_seqlen / kBlockN : cute::ceil_div(seqlen_k, kBlockN);
+        const bool NoSplit = n_block_min == 0 && n_block_max == cute::ceil_div(seqlen_k, kBlockN);
+        if (batch_id > begin_idx) {
+            __syncthreads();  // Barrier between two tiles.
+        }
+        flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits>(params, batch_id, bidh, m_block, n_split_idx, seqlen_k, n_block_min, n_block_max, NoSplit, shared_storage);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, int kBlockM, int Log_max_splits, typename Params>
-__forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &params) {
+template<typename Kernel_traits, int kBlockM, int Log_max_splits>
+__forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Flash_fwd_mla_params &params) {
     using OutElement = typename Kernel_traits::OutElement;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -605,8 +631,7 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
     const int tidx = threadIdx.x;
     const int bidx = blockIdx.x;
 
-    const int seqlen_k = params.cu_seqlens_k[bidx * kBlockM / (params.h * params.seqlen_q)];
-    const int actual_num_splits = std::min(params.num_splits, cute::ceil_div(seqlen_k, PARTITION_SIZE));
+    const int actual_num_splits = params.num_splits_ptr[bidx * kBlockM / (params.h * params.seqlen_q)];
     if (actual_num_splits == 1) return;
     const index_t row_offset_lse = bidx * kBlockM;
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
@@ -747,13 +772,13 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
 
 template<typename Kernel_traits>
 __global__ void __launch_bounds__(256, 1, 1)
-flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_params params) {
+flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
     flash::compute_attn_splitkv_mla<Kernel_traits>(params);
 }
 
 template<typename Kernel_traits, int kBlockM, int Log_max_splits>
 __global__ void __launch_bounds__(256, 1, 1)
-flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_params params) {
+flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
     static_assert(Log_max_splits >= 1);
     flash::combine_attn_seqk_parallel_mla<Kernel_traits, kBlockM, Log_max_splits>(params);
 }
@@ -761,35 +786,30 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_params pa
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits>
-void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
-    TORCH_CHECK(params.page_block_size == Kernel_traits::kBlockN);
-    TORCH_CHECK(!params.unpadded_lse);
-    TORCH_CHECK(!params.is_causal);
-    TORCH_CHECK(!(params.window_size_left >= 0 || params.window_size_right >= 0));
-    TORCH_CHECK(params.alibi_slopes_ptr == nullptr);
-    const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
+void run_flash_splitkv_fwd_mla(Flash_fwd_mla_params &params, cudaStream_t stream) {
+    FLASH_ASSERT(params.page_block_size == Kernel_traits::kBlockN);
+    const int num_m_block = cute::ceil_div(params.seqlen_q, Kernel_traits::kBlockM);
     auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits>;
     constexpr size_t smem_size = sizeof(flash::SharedStorageMLA<Kernel_traits>);
-    C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-    kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    if (params.num_splits > 1) {
-        // We want kBlockM to be as small as possible for more parallelism.
-        // With 128 threads we can load 512 elements at a time, so if headdim is divisible by 128, kBlockM = 4.
-        // If headdim is divisible by 64, then we set kBlockM = 8, etc.
-        constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
-        dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
-        NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
-            flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream>>>(params);
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
-        });
-    }
+    CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<dim3(num_m_block, params.h, params.num_sm_parts), Kernel_traits::kNThreads, smem_size, stream>>>(params);
+    CHECK_CUDA_KERNEL_LAUNCH();
+
+    // We want kBlockM to be as small as possible for more parallelism.
+    // With 128 threads we can load 512 elements at a time, so if headdim is divisible by 128, kBlockM = 4.
+    // If headdim is divisible by 64, then we set kBlockM = 8, etc.
+    constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
+    dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
+    NUM_SPLITS_SWITCH(params.num_sm_parts, kLogMaxSplits, [&] {
+        flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream>>>(params);
+    });
+    CHECK_CUDA_KERNEL_LAUNCH();
 }
 
 template<typename T, int Headdim>
-void run_mha_fwd_splitkv_dispatch_mla(Flash_fwd_params &params, cudaStream_t stream) {
-    static_assert (Headdim == 576);
-    TORCH_CHECK(params.d_v == 512);
+void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream) {
+    static_assert(Headdim == 576);
+    FLASH_ASSERT(params.d_v == 512);
     if (params.kvcache_quantization_type == 0) {
         run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512>>(params, stream);
     } else {

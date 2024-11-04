@@ -4,6 +4,27 @@
 
 #pragma once
 
+#define CHECK_CUDA(call)                                                                                  \
+    do {                                                                                                  \
+        cudaError_t status_ = call;                                                                       \
+        if (status_ != cudaSuccess) {                                                                     \
+            fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, cudaGetErrorString(status_)); \
+            exit(1);                                                                                      \
+        }                                                                                                 \
+    } while(0)
+
+#define CHECK_CUDA_KERNEL_LAUNCH() CHECK_CUDA(cudaGetLastError())
+
+
+#define FLASH_ASSERT(cond)                                                                                \
+    do {                                                                                                  \
+        if (not (cond)) {                                                                                 \
+            fprintf(stderr, "Assertion failed (%s:%d): %s\n", __FILE__, __LINE__, #cond);                 \
+            exit(1);                                                                                      \
+        }                                                                                                 \
+    } while(0)
+
+
 /// @param COND       - a boolean expression to switch by
 /// @param CONST_NAME - a name given for the constexpr bool variable.
 /// @param ...       - code to execute for true and false
@@ -199,8 +220,7 @@
       using quant_type1 = cutlass::bfloat16_t;      \
       return __VA_ARGS__();                         \
     } else {                                        \
-      TORCH_CHECK(                                  \
-        false, "Unsupported TYPE");                 \
+      FLASH_ASSERT(false);                          \
     }                                               \
   }()
 #endif
@@ -221,8 +241,7 @@
       constexpr static int SplitLength = 384;                       \
       return __VA_ARGS__();                                         \
     } else {                                                        \
-      TORCH_CHECK(                                                  \
-        false, "Unsupported SplitLength");                          \
+      FLASH_ASSERT(false);                                          \
     }                                                               \
   }()
 #endif
@@ -251,6 +270,6 @@
       constexpr static int LOG_MAX_SPLITS = 7;                                 \
       return __VA_ARGS__();                                                    \
     } else {                                                                   \
-      TORCH_CHECK(false, "Only support num_splits <= 128");                    \
+      FLASH_ASSERT(false);                                                     \
     }                                                                          \
   }()
