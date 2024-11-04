@@ -99,7 +99,7 @@ struct Flash_fwd_kernel_traits_mla {
             Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
 
     using GmemLayoutAtomO = Layout<
-            Shape<Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+            Shape<Int<kNThreadsS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopyO = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, Element>{},
@@ -109,7 +109,7 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
     static constexpr int kGmemThreadsPerRowAccum = kBlockKSmem / kGmemElemsPerLoadAccum;
     using GmemLayoutAtomOaccum = Layout<
-            Shape<Int<kNThreadsLoad / kGmemThreadsPerRowAccum>, Int<kGmemThreadsPerRowAccum>>,
+            Shape<Int<kNThreadsS / kGmemThreadsPerRowAccum>, Int<kGmemThreadsPerRowAccum>>,
             Stride<Int<kGmemThreadsPerRowAccum>, _1>>;
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, ElementAccum>{},
@@ -215,13 +215,13 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
 
     using GmemTiledCopyO = std::conditional_t<!Split, typename Kernel_traits::GmemTiledCopyO, typename Kernel_traits::GmemTiledCopyOaccum>;
     GmemTiledCopyO gmem_tiled_copy_Oaccum;
-    auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx - kNThreadsS);
+    auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
     Tensor tOsOaccum = gmem_thr_copy_Oaccum.partition_S(sOaccum);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_D(gOaccum);
 
     __syncthreads();
 
-    if (tidx < kNThreadsS) {
+    if (tidx >= kNThreadsS) {
         return;
     }
 
