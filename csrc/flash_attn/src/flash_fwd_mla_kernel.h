@@ -32,11 +32,11 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr bool Share_KV = true;
     static constexpr bool Blocked_KV = true;
 
-    // The number of threads.
     static constexpr int kNWarps = 8;
     static constexpr int kNThreads = kNWarps * 32;
     static constexpr int kNWarpsS = 4;
     static constexpr int kNThreadsS = kNWarpsS * 32;
+    static constexpr bool QKCooperative = false;
 
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
@@ -45,18 +45,17 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr int kHeadDimV = kHeadDimV_ != 0 ? kHeadDimV_ : kHeadDim;
     static_assert(kHeadDimV % 32 == 0);
     static constexpr int kBlockKSmem = (kHeadDim % 64 == 0 && SplitLength_ % 64 == 0) ? 64 : 32;
-    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
 
     using TiledMma = decltype(make_tiled_mma(
             cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>,
-                    GMMA::Major::K, GMMA::Major::K>(),
+            GMMA::Major::K, GMMA::Major::K>(),
             Layout<Shape<Int<kNWarpsS / 4>, _1, _1>>{}));
 
     static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
     using TiledMmaO = decltype(make_tiled_mma(
             cute::GMMA::rs_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
-                    GMMA::Major::K, GMMA::Major::MN>(),
+            GMMA::Major::K, GMMA::Major::MN>(),
             Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
 
     using SmemLayoutQ = decltype(tile_to_shape(
@@ -70,16 +69,15 @@ struct Flash_fwd_kernel_traits_mla {
     using SmemLayoutV = decltype(tile_to_shape(
             getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
             Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
+    using SmemLayoutVtransposed = decltype(composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
 
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
     using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<_1, _2>>;
 
-    using SmemLayoutVtransposed = decltype(composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
-
-    using SmemLayoutAtomO = decltype(
-    composition(Swizzle<kSwizzle, 3, 3>{},
-                Layout<Shape<Int<8>, Int<kBlockKSmem>>,
-                        Stride<Int<kBlockKSmem>, _1>>{}));
+    using SmemLayoutAtomO = decltype(composition(
+            Swizzle<kSwizzle, 3, 3>{},
+            Layout<Shape<Int<8>, Int<kBlockKSmem>>,
+            Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutO = decltype(tile_to_shape(
             SmemLayoutAtomO{},
             Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
@@ -89,58 +87,50 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
     static_assert(kHeadDim % kGmemElemsPerLoad == 0, "kHeadDim must be a multiple of kGmemElemsPerLoad");
     static constexpr int kGmemThreadsPerRow = kBlockKSmem / kGmemElemsPerLoad;
-    static_assert(kNThreads % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
-    using GmemLayoutAtom = Layout<Shape <Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
-            Stride<Int<kGmemThreadsPerRow>, _1>>;
-
     using Gmem_copy_struct = SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>;
-
-    static constexpr bool QKCooperative = kNThreads == kNThreadsS;
     static constexpr int kNThreadsLoad = kNThreads - kNThreadsS;
     static_assert(kNThreadsLoad % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
-    using GmemLayoutAtomK_ = Layout<Shape <Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+    using GmemLayoutAtom = Layout<Shape <Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
-    using GmemLayoutAtomK = std::conditional_t<QKCooperative, GmemLayoutAtom, GmemLayoutAtomK_>;
-    using GmemTiledCopyK = decltype(
-    make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
-                    GmemLayoutAtomK{},
-                    Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
+    using GmemTiledCopy = decltype(make_tiled_copy(
+            Copy_Atom<Gmem_copy_struct, Element>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
 
     static constexpr int SplitLength = SplitLength_;
     static_assert(SplitLength % kBlockKSmem == 0);
     using KV_type0 = std::conditional_t<(SplitLength > 0), KV_type0_, Element>;
     using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;;
-    using GmemTiledCopyKQuant0 = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, KV_type0>{},
-                    GmemLayoutAtomK{},
-                    Layout<Shape<_1, _8>>{}));
-    using GmemTiledCopyKQuant1 = decltype(
-    make_tiled_copy(Copy_Atom<std::conditional_t<std::is_same_v<KV_type1, Element>, Gmem_copy_struct, DefaultCopy>, KV_type1>{},
-                    GmemLayoutAtomK{},
-                    Layout<Shape<_1, _8>>{}));
-    using SmemTiledCopyK = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
-                    GmemLayoutAtomK{},
-                    Layout<Shape<_1, _8>>{}));
+    using GmemTiledCopyKQuant0 = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, KV_type0>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));
+    using GmemTiledCopyKQuant1 = decltype(make_tiled_copy(
+            Copy_Atom<std::conditional_t<std::is_same_v<KV_type1, Element>, Gmem_copy_struct, DefaultCopy>, KV_type1>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));
+    using SmemTiledCopyK = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, Element>{},
+            GmemLayoutAtom{},
+            Layout<Shape<_1, _8>>{}));
 
-    using GmemLayoutAtomO = Layout<Shape <Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+    using GmemLayoutAtomO = Layout<
+            Shape<Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
-    using GmemTiledCopyO = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
-                    GmemLayoutAtomO{},
-                    Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
+    using GmemTiledCopyO = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, Element>{},
+            GmemLayoutAtomO{},
+            Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
 
     using GmemLayoutAtomOaccum = std::conditional_t<
             kBlockKSmem == 32,
-            Layout<Shape <_16, _8>,  // Thread layout, 8 threads per row
-                    Stride< _8, _1>>,
-            Layout<Shape <_8, _16>,  // Thread layout, 16 threads per row
-                    Stride< _16, _1>>
+            Layout<Shape<_16, _8>, Stride<_8, _1>>,
+            Layout<Shape<_8, _16>, Stride<_16, _1>>
     >;
-    using GmemTiledCopyOaccum = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
-                    GmemLayoutAtomOaccum{},
-                    Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+    using GmemTiledCopyOaccum = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, ElementAccum>{},
+            GmemLayoutAtomOaccum{},
+            Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
 };
 
 namespace flash {
@@ -409,7 +399,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
                                 Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                 make_stride(params.q_row_stride, _1{}));
-        typename Kernel_traits::GmemTiledCopyK gmem_tiled_copy_Q;
+        typename Kernel_traits::GmemTiledCopy gmem_tiled_copy_Q;
         auto gmem_thr_copy_Q = gmem_tiled_copy_Q.get_thread_slice(tidx - kNThreadsS);
         Tensor tQgQ = gmem_thr_copy_Q.partition_S(gQ);
         Tensor tQsQ = gmem_thr_copy_Q.partition_D(sQ);
@@ -430,7 +420,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Params 
         Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
                                 Shape<Int<kBlockN>, Int<kHeadDim>>{},
                                 make_stride(params.k_row_stride, _1{}));
-        typename Kernel_traits::GmemTiledCopyK gmem_tiled_copy_K;
+        typename Kernel_traits::GmemTiledCopy gmem_tiled_copy_K;
         auto gmem_thr_copy_K = gmem_tiled_copy_K.get_thread_slice(tidx - kNThreadsS);
         Tensor tKgK = gmem_thr_copy_K.partition_S(gK);
         Tensor tKsK = gmem_thr_copy_K.partition_D(sK);
