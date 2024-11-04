@@ -130,7 +130,7 @@ struct Flash_fwd_kernel_traits_mla {
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, ElementAccum>{},
             GmemLayoutAtomOaccum{},
-            Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+            Layout<Shape<_1, _4>>{}));  // Val layout, 4 vals per store
 };
 
 namespace flash {
