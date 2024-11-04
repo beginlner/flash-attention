@@ -688,10 +688,10 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
                                  Stride<Int<kHeadDimV>, _1>{});
     constexpr int kBlockN = kNThreads / kBlockM;
     using GmemLayoutAtomOaccum = Layout<Shape<Int<kBlockM>, Int<kBlockN>>, Stride<Int<kBlockN>, _1>>;
-    using GmemTiledCopyOaccum = decltype(
-            make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
-                            GmemLayoutAtomOaccum{},
-                            Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+    using GmemTiledCopyOaccum = decltype(make_tiled_copy(
+            Copy_Atom<DefaultCopy, ElementAccum>{},
+            GmemLayoutAtomOaccum{},
+            Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
     GmemTiledCopyOaccum gmem_tiled_copy_Oaccum;
     auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_S(gOaccum);
@@ -742,7 +742,7 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Params &par
             for (int k = 0; k < size<2>(rO); ++k) {
                 const int col = get<1>(tOcOaccum(0, m, k));
                 Tensor gO = make_tensor(make_gmem_ptr(o_ptr + col),
-                Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
+                                        Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
                 // TODO: Should check if this is using vectorized store, but it seems pretty fast
                 copy(rO(_, m, k), gO);
                 // if (bidx == 0 && tidx == 0) { printf("tidx = %d, idx = %d, batch_idx = %d, head_idx = %d, row = %d, col = %d\n", tidx, idx, batch_idx, head_idx, row, col); print(rO(_, m, k)); print(gO); }
