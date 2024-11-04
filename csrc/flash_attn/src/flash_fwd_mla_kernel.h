@@ -90,7 +90,8 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr int kNThreadsLoad = kNThreads - kNThreadsS;
     static_assert(kNThreadsLoad % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
 
-    using GmemLayoutAtom = Layout<Shape<Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+    using GmemLayoutAtom = Layout<
+            Shape<Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopy = decltype(make_tiled_copy(
             Copy_Atom<Gmem_copy_struct, Element>{},
@@ -98,18 +99,18 @@ struct Flash_fwd_kernel_traits_mla {
             Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
 
     using GmemLayoutAtomO = Layout<
-            Shape<Int<kNThreadsS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+            Shape<Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopyO = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, Element>{},
             GmemLayoutAtomO{},
             Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
 
-    using GmemLayoutAtomOaccum = std::conditional_t<
-            kBlockKSmem == 32,
-            Layout<Shape<_16, _8>, Stride<_8, _1>>,
-            Layout<Shape<_8, _16>, Stride<_16, _1>>
-    >;
+    static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
+    static constexpr int kGmemThreadsPerRowAccum = kBlockKSmem / kGmemElemsPerLoadAccum;
+    using GmemLayoutAtomOaccum = Layout<
+            Shape<Int<kNThreadsLoad / kGmemThreadsPerRowAccum>, Int<kGmemThreadsPerRowAccum>>,
+            Stride<Int<kGmemThreadsPerRowAccum>, _1>>;
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, ElementAccum>{},
             GmemLayoutAtomOaccum{},
@@ -214,13 +215,13 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
 
     using GmemTiledCopyO = std::conditional_t<!Split, typename Kernel_traits::GmemTiledCopyO, typename Kernel_traits::GmemTiledCopyOaccum>;
     GmemTiledCopyO gmem_tiled_copy_Oaccum;
-    auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
+    auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx - kNThreadsS);
     Tensor tOsOaccum = gmem_thr_copy_Oaccum.partition_S(sOaccum);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_D(gOaccum);
 
     __syncthreads();
 
-    if (tidx >= kNThreadsS) {
+    if (tidx < kNThreadsS) {
         return;
     }
 
