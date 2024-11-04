@@ -20,31 +20,23 @@
 #include "softmax.h"
 #include "mask.h"
 
-template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
+template<int kHeadDim_, int kBlockM_, int kBlockN_, typename elem_type=cutlass::bfloat16_t,
         int kHeadDimV_=0,
-        bool Share_KV_=false,
-        int kNWarpsS_=0,
-        bool Blocked_KV_=true,
-        int SplitLength_=0, typename KV_type0_=cutlass::half_t, typename KV_type1_=cutlass::half_t,
-        typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
-struct Flash_fwd_kernel_traits_mla : public Base {
-    using Element = typename Base::Element;
+        int SplitLength_=0, typename KV_type0_=cutlass::bfloat16_t, typename KV_type1_=cutlass::bfloat16_t>
+struct Flash_fwd_kernel_traits_mla {
+    using Element = elem_type;
     using OutElement = Element;
-    using ElementAccum = typename Base::ElementAccum;
-    using index_t = typename Base::index_t;
-    static constexpr bool Has_cp_async = Base::Has_cp_async;
+    using ElementAccum = float;
+    using index_t = int64_t;
 
-    static constexpr bool Share_Q_K_smem = Share_Q_K_smem_;
-    static constexpr bool Is_Q_in_regs = Is_Q_in_regs_ || Share_Q_K_smem;
-    static constexpr bool Share_KV = Share_KV_;
-    static constexpr bool Blocked_KV = Blocked_KV_;
+    static constexpr bool Share_KV = true;
+    static constexpr bool Blocked_KV = true;
 
     // The number of threads.
-    static constexpr int kNWarps = kNWarps_;
+    static constexpr int kNWarps = 8;
     static constexpr int kNThreads = kNWarps * 32;
-    static constexpr int kNWarpsS = kNWarpsS_ == 0 ? kNWarps : kNWarpsS_;
+    static constexpr int kNWarpsS = 4;
     static constexpr int kNThreadsS = kNWarpsS * 32;
-    static_assert(kNThreads % kNThreadsS == 0);
 
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
@@ -82,9 +74,7 @@ struct Flash_fwd_kernel_traits_mla : public Base {
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
     using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<_1, _2>>;
 
-    // https://github.com/ColfaxResearch/cutlass-kernels/blob/a222587e6d59b93ba704853d3946fb686d8b8892/src/fmha/fmha_forward.cu#L434
-    using SmemLayoutVtransposed = decltype(
-    composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
+    using SmemLayoutVtransposed = decltype(composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
 
     using SmemLayoutAtomO = decltype(
     composition(Swizzle<kSwizzle, 3, 3>{},
@@ -96,36 +86,14 @@ struct Flash_fwd_kernel_traits_mla : public Base {
     using SmemCopyAtomO = Copy_Atom<SM90_U32x4_STSM_N, Element>;
     using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;
 
-    static constexpr int kSmemQSize = size(SmemLayoutQ{}) * sizeof(Element);
-    static constexpr int kSmemKVSize = (Share_KV ? size(SmemLayoutK{}) * 2 : size(SmemLayoutK{}) + size(SmemLayoutV{})) * sizeof(Element);
-    static constexpr int kSmemPSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutP{}) * sizeof(Element);
-    static constexpr int kSmemRowSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutRow{}) * 3 * sizeof(float);
-    static constexpr int kSmemBlockTableSize = kNThreadsS == kNThreads ? (PARTITION_SIZE / 32) * sizeof(int) : 0;
-    static constexpr int kSmemSize = Share_Q_K_smem ? std::max(kSmemQSize, kSmemKVSize) : kSmemQSize + kSmemKVSize + kSmemPSize + kSmemRowSize + kSmemBlockTableSize;
-
     static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
     static_assert(kHeadDim % kGmemElemsPerLoad == 0, "kHeadDim must be a multiple of kGmemElemsPerLoad");
-    // Using kBlockKSmem here is 6-10% faster than kBlockKGmem for d=128 because of bank conflicts.
-    // For example, for d=128, smem is split into 2 "pages", each page takes care of columns
-    // 0-63 and 64-127. If we have 16 threads per row for gmem read, when we write to smem,
-    // thread 0 - 7 will write to the first page and thread 8 - 15 will write to the second page,
-    // to the same banks.
     static constexpr int kGmemThreadsPerRow = kBlockKSmem / kGmemElemsPerLoad;
     static_assert(kNThreads % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
     using GmemLayoutAtom = Layout<Shape <Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
 
-    // We use CACHEGLOBAL instead of CACHEALWAYS for both Q and K/V, since we won't be reading
-    // from the same address by the same threadblock. This is slightly faster.
-    using Gmem_copy_struct = std::conditional_t<
-            Has_cp_async,
-            SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>,
-            DefaultCopy
-    >;
-    using GmemTiledCopyQKV = decltype(
-    make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
-                    GmemLayoutAtom{},
-                    Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
+    using Gmem_copy_struct = SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>;
 
     static constexpr bool QKCooperative = kNThreads == kNThreadsS;
     static constexpr int kNThreadsLoad = kNThreads - kNThreadsS;
@@ -173,15 +141,6 @@ struct Flash_fwd_kernel_traits_mla : public Base {
     make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
                     GmemLayoutAtomOaccum{},
                     Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
-    using GmemLayoutAtomRotcossin = GmemLayoutAtom;
-    using GmemTiledCopyRotcossin = decltype(
-    make_tiled_copy(Copy_Atom<UniversalCopy<uint64_t>, Element>{},
-                    GmemLayoutAtomRotcossin{},
-                    Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per load
-    using GmemTiledCopyRotcossinCont = decltype(
-    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
-                    GmemLayoutAtomRotcossin{},
-                    Layout<Shape < _1, _8>>{}));  // Val layout, 8 vals per load
 };
 
 namespace flash {
@@ -858,11 +817,11 @@ void run_mha_fwd_splitkv_dispatch_mla(Flash_fwd_params &params, cudaStream_t str
     static_assert (Headdim == 576);
     TORCH_CHECK(params.d_v == 512);
     if (params.kvcache_quantization_type == 0) {
-        run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
+        run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512>>(params, stream);
     } else {
         KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
             KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
-                run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, 8, false, false, T, 512, true, 4, true, SplitLength, quant_type0, quant_type1>>(params, stream);
+                run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512, SplitLength, quant_type0, quant_type1>>(params, stream);
             });
         });
     }
