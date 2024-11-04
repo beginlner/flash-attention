@@ -13,7 +13,6 @@
 #include "static_switch.h"
 #include "flash.h"
 #include "flash_fwd_kernel.h"
-#include "flash_fwd_mla_kernel.h"
 
 // Determine if the architecture supports FLASH and define a macro to handle parameter modifiers
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -157,10 +156,22 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
         dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
         EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
-            NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
-                C10_CUDA_KERNEL_LAUNCH_CHECK();
-            });
+            if (params.num_splits <= 2) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 1, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            } else if (params.num_splits <= 4) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 2, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            } else if (params.num_splits <= 8) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 3, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            } else if (params.num_splits <= 16) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 4, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            } else if (params.num_splits <= 32) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 5, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            } else if (params.num_splits <= 64) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 6, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            } else if (params.num_splits <= 128) {
+                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 7, IsEvenKConst><<<grid_combine, 128, 0, stream1>>>(params);
+            }
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
         wait_stream(stream, stream1);
     }
@@ -173,7 +184,17 @@ void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream)
     // and for headdim 192 with block size 64 x 128.
     // Also for headdim 160 with block size 64 x 128 after the rotary addition.
     if constexpr (Headdim == 576) {
-        run_mha_fwd_splitkv_dispatch_mla<T, Headdim>(params, stream);
+        TORCH_CHECK(params.d_v == 512);
+        // Shared KV
+        if (params.kvcache_quantization_type == 0) {
+            run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
+        } else {
+            KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
+                KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
+                    run_flash_splitkv_fwd<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, true, SplitLength, quant_type0, quant_type1>>(params, stream);
+                });
+            });
+        }
         return;
     } else {
         constexpr static int kBlockN = Headdim <= 64 ? 256 : (Headdim <= 128 ? 128 : (Headdim <= 256 ? 64 : 32));
