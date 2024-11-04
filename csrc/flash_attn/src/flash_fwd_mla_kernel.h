@@ -20,6 +20,170 @@
 #include "softmax.h"
 #include "mask.h"
 
+template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
+        int kHeadDimV_=0,
+        bool Share_KV_=false,
+        int kNWarpsS_=0,
+        bool Blocked_KV_=true,
+        int SplitLength_=0, typename KV_type0_=cutlass::half_t, typename KV_type1_=cutlass::half_t,
+        typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
+struct Flash_fwd_kernel_traits_mla : public Base {
+    using Element = typename Base::Element;
+    using OutElement = Element;
+    using ElementAccum = typename Base::ElementAccum;
+    using index_t = typename Base::index_t;
+    static constexpr bool Has_cp_async = Base::Has_cp_async;
+
+    static constexpr bool Share_Q_K_smem = Share_Q_K_smem_;
+    static constexpr bool Is_Q_in_regs = Is_Q_in_regs_ || Share_Q_K_smem;
+    static constexpr bool Share_KV = Share_KV_;
+    static constexpr bool Blocked_KV = Blocked_KV_;
+
+    // The number of threads.
+    static constexpr int kNWarps = kNWarps_;
+    static constexpr int kNThreads = kNWarps * 32;
+    static constexpr int kNWarpsS = kNWarpsS_ == 0 ? kNWarps : kNWarpsS_;
+    static constexpr int kNThreadsS = kNWarpsS * 32;
+    static_assert(kNThreads % kNThreadsS == 0);
+
+    static constexpr int kBlockM = kBlockM_;
+    static constexpr int kBlockN = kBlockN_;
+    static constexpr int kHeadDim = kHeadDim_;
+    static_assert(kHeadDim % 32 == 0);
+    static constexpr int kHeadDimV = kHeadDimV_ != 0 ? kHeadDimV_ : kHeadDim;
+    static_assert(kHeadDimV % 32 == 0);
+    static constexpr int kBlockKSmem = (kHeadDim % 64 == 0 && SplitLength_ % 64 == 0) ? 64 : 32;
+    static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
+    static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
+
+    using TiledMma = decltype(make_tiled_mma(
+            cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>,
+                    GMMA::Major::K, GMMA::Major::K>(),
+            Layout<Shape<Int<kNWarpsS / 4>, _1, _1>>{}));
+
+    static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
+    using TiledMmaO = decltype(make_tiled_mma(
+            cute::GMMA::rs_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
+                    GMMA::Major::K, GMMA::Major::MN>(),
+            Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
+
+    using SmemLayoutQ = decltype(tile_to_shape(
+            getSmemLayoutK<Element, kHeadDim>(),
+            Shape<Int<kBlockM>, Int<kHeadDim>>{}));
+
+    using SmemLayoutK = decltype(tile_to_shape(
+            getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
+            Shape<Int<kBlockN>, Int<kHeadDim>>{}));
+
+    using SmemLayoutV = decltype(tile_to_shape(
+            getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
+            Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
+
+    using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
+    using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<_1, _2>>;
+
+    // https://github.com/ColfaxResearch/cutlass-kernels/blob/a222587e6d59b93ba704853d3946fb686d8b8892/src/fmha/fmha_forward.cu#L434
+    using SmemLayoutVtransposed = decltype(
+    composition(SmemLayoutV{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{}, GenRowMajor{})));
+
+    using SmemLayoutAtomO = decltype(
+    composition(Swizzle<kSwizzle, 3, 3>{},
+                Layout<Shape<Int<8>, Int<kBlockKSmem>>,
+                        Stride<Int<kBlockKSmem>, _1>>{}));
+    using SmemLayoutO = decltype(tile_to_shape(
+            SmemLayoutAtomO{},
+            Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
+    using SmemCopyAtomO = Copy_Atom<SM90_U32x4_STSM_N, Element>;
+    using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;
+
+    static constexpr int kSmemQSize = size(SmemLayoutQ{}) * sizeof(Element);
+    static constexpr int kSmemKVSize = (Share_KV ? size(SmemLayoutK{}) * 2 : size(SmemLayoutK{}) + size(SmemLayoutV{})) * sizeof(Element);
+    static constexpr int kSmemPSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutP{}) * sizeof(Element);
+    static constexpr int kSmemRowSize = kNThreadsS == kNThreads ? 0 : size(SmemLayoutRow{}) * 3 * sizeof(float);
+    static constexpr int kSmemBlockTableSize = kNThreadsS == kNThreads ? (PARTITION_SIZE / 32) * sizeof(int) : 0;
+    static constexpr int kSmemSize = Share_Q_K_smem ? std::max(kSmemQSize, kSmemKVSize) : kSmemQSize + kSmemKVSize + kSmemPSize + kSmemRowSize + kSmemBlockTableSize;
+
+    static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
+    static_assert(kHeadDim % kGmemElemsPerLoad == 0, "kHeadDim must be a multiple of kGmemElemsPerLoad");
+    // Using kBlockKSmem here is 6-10% faster than kBlockKGmem for d=128 because of bank conflicts.
+    // For example, for d=128, smem is split into 2 "pages", each page takes care of columns
+    // 0-63 and 64-127. If we have 16 threads per row for gmem read, when we write to smem,
+    // thread 0 - 7 will write to the first page and thread 8 - 15 will write to the second page,
+    // to the same banks.
+    static constexpr int kGmemThreadsPerRow = kBlockKSmem / kGmemElemsPerLoad;
+    static_assert(kNThreads % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
+    using GmemLayoutAtom = Layout<Shape <Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+            Stride<Int<kGmemThreadsPerRow>, _1>>;
+
+    // We use CACHEGLOBAL instead of CACHEALWAYS for both Q and K/V, since we won't be reading
+    // from the same address by the same threadblock. This is slightly faster.
+    using Gmem_copy_struct = std::conditional_t<
+            Has_cp_async,
+            SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>,
+            DefaultCopy
+    >;
+    using GmemTiledCopyQKV = decltype(
+    make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
+                    GmemLayoutAtom{},
+                    Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
+
+    static constexpr bool QKCooperative = kNThreads == kNThreadsS;
+    static constexpr int kNThreadsLoad = kNThreads - kNThreadsS;
+    static_assert(kNThreadsLoad % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
+    using GmemLayoutAtomK_ = Layout<Shape <Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+            Stride<Int<kGmemThreadsPerRow>, _1>>;
+    using GmemLayoutAtomK = std::conditional_t<QKCooperative, GmemLayoutAtom, GmemLayoutAtomK_>;
+    using GmemTiledCopyK = decltype(
+    make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
+                    GmemLayoutAtomK{},
+                    Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
+
+    static constexpr int SplitLength = SplitLength_;
+    static_assert(SplitLength % kBlockKSmem == 0);
+    using KV_type0 = std::conditional_t<(SplitLength > 0), KV_type0_, Element>;
+    using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;;
+    using GmemTiledCopyKQuant0 = decltype(
+    make_tiled_copy(Copy_Atom<DefaultCopy, KV_type0>{},
+                    GmemLayoutAtomK{},
+                    Layout<Shape<_1, _8>>{}));
+    using GmemTiledCopyKQuant1 = decltype(
+    make_tiled_copy(Copy_Atom<std::conditional_t<std::is_same_v<KV_type1, Element>, Gmem_copy_struct, DefaultCopy>, KV_type1>{},
+                    GmemLayoutAtomK{},
+                    Layout<Shape<_1, _8>>{}));
+    using SmemTiledCopyK = decltype(
+    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+                    GmemLayoutAtomK{},
+                    Layout<Shape<_1, _8>>{}));
+
+    using GmemLayoutAtomO = Layout<Shape <Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+            Stride<Int<kGmemThreadsPerRow>, _1>>;
+    using GmemTiledCopyO = decltype(
+    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+                    GmemLayoutAtomO{},
+                    Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
+
+    using GmemLayoutAtomOaccum = std::conditional_t<
+            kBlockKSmem == 32,
+            Layout<Shape <_16, _8>,  // Thread layout, 8 threads per row
+                    Stride< _8, _1>>,
+            Layout<Shape <_8, _16>,  // Thread layout, 16 threads per row
+                    Stride< _16, _1>>
+    >;
+    using GmemTiledCopyOaccum = decltype(
+    make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
+                    GmemLayoutAtomOaccum{},
+                    Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+    using GmemLayoutAtomRotcossin = GmemLayoutAtom;
+    using GmemTiledCopyRotcossin = decltype(
+    make_tiled_copy(Copy_Atom<UniversalCopy<uint64_t>, Element>{},
+                    GmemLayoutAtomRotcossin{},
+                    Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per load
+    using GmemTiledCopyRotcossinCont = decltype(
+    make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+                    GmemLayoutAtomRotcossin{},
+                    Layout<Shape < _1, _8>>{}));  // Val layout, 8 vals per load
+};
+
 namespace flash {
 
 using namespace cute;
@@ -685,6 +849,21 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
         NUM_SPLITS_SWITCH(params.num_splits, kLogMaxSplits, [&] {
             flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream>>>(params);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
+        });
+    }
+}
+
+template<typename T, int Headdim>
+void run_mha_fwd_splitkv_dispatch_mla(Flash_fwd_params &params, cudaStream_t stream) {
+    static_assert (Headdim == 576);
+    TORCH_CHECK(params.d_v == 512);
+    if (params.kvcache_quantization_type == 0) {
+        run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
+    } else {
+        KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
+            KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
+                run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, 8, false, false, T, 512, true, 4, true, SplitLength, quant_type0, quant_type1>>(params, stream);
+            });
         });
     }
 }

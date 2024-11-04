@@ -173,17 +173,7 @@ void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream)
     // and for headdim 192 with block size 64 x 128.
     // Also for headdim 160 with block size 64 x 128 after the rotary addition.
     if constexpr (Headdim == 576) {
-        TORCH_CHECK(params.d_v == 512);
-        // Shared KV
-        if (params.kvcache_quantization_type == 0) {
-            run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4>>(params, stream);
-        } else {
-            KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
-                KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
-                    run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits<576, 64, 64, 8, false, false, T, 512, true, 4, true, SplitLength, quant_type0, quant_type1>>(params, stream);
-                });
-            });
-        }
+        run_mha_fwd_splitkv_dispatch_mla<T, Headdim>(params, stream);
         return;
     } else {
         constexpr static int kBlockN = Headdim <= 64 ? 256 : (Headdim <= 128 ? 128 : (Headdim <= 256 ? 64 : 32));
