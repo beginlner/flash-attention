@@ -49,13 +49,13 @@ struct Flash_fwd_kernel_traits_mla {
 
     using TiledMma = decltype(make_tiled_mma(
             cute::GMMA::ss_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>,
-            GMMA::Major::K, GMMA::Major::K>(),
+                    GMMA::Major::K, GMMA::Major::K>(),
             Layout<Shape<Int<kNWarpsS / 4>, _1, _1>>{}));
 
     static constexpr int AtomLayoutNO = kNThreads / kNThreadsS;
     using TiledMmaO = decltype(make_tiled_mma(
             cute::GMMA::rs_op_selector<Element, Element, ElementAccum, Shape<Int<kBlockM>, Int<kHeadDimV / AtomLayoutNO>, Int<kBlockN>>,
-            GMMA::Major::K, GMMA::Major::MN>(),
+                    GMMA::Major::K, GMMA::Major::MN>(),
             Layout<Shape<Int<kNWarpsS / 4>, Int<AtomLayoutNO>, _1>>{}));
 
     using SmemLayoutQ = decltype(tile_to_shape(
@@ -76,8 +76,7 @@ struct Flash_fwd_kernel_traits_mla {
 
     using SmemLayoutAtomO = decltype(composition(
             Swizzle<kSwizzle, 3, 3>{},
-            Layout<Shape<Int<8>, Int<kBlockKSmem>>,
-            Stride<Int<kBlockKSmem>, _1>>{}));
+            Layout<Shape<Int<8>, Int<kBlockKSmem>>, Stride<Int<kBlockKSmem>, _1>>{}));
     using SmemLayoutO = decltype(tile_to_shape(
             SmemLayoutAtomO{},
             Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
@@ -90,7 +89,7 @@ struct Flash_fwd_kernel_traits_mla {
     using Gmem_copy_struct = SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>;
     static constexpr int kNThreadsLoad = kNThreads - kNThreadsS;
     static_assert(kNThreadsLoad % kGmemThreadsPerRow == 0, "kNThreads must be a multiple of kGmemThreadsPerRow");
-    using GmemLayoutAtom = Layout<Shape <Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+    using GmemLayoutAtom = Layout<Shape<Int<kNThreadsLoad / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopy = decltype(make_tiled_copy(
             Copy_Atom<Gmem_copy_struct, Element>{},
@@ -115,7 +114,7 @@ struct Flash_fwd_kernel_traits_mla {
             Layout<Shape<_1, _8>>{}));
 
     using GmemLayoutAtomO = Layout<
-            Shape<Int<kNThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+            Shape<Int<kNThreadsS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopyO = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, Element>{},
