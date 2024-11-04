@@ -102,7 +102,7 @@ struct Flash_fwd_kernel_traits : public Base {
         Shape<Int<kBlockN>, Int<kHeadDimV>>{}));
 
     using SmemLayoutP = Layout<Shape<Shape<_2, _2>, Int<kNThreadsS>, _1, Int<kBlockN / 8>>>;
-    using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<_1, _2>>;
+    using SmemLayoutRow = Layout<Shape<_2, Int<kNThreadsS>>, Stride<Int<kNThreadsS>, _1>>;
 
     // https://github.com/ColfaxResearch/cutlass-kernels/blob/a222587e6d59b93ba704853d3946fb686d8b8892/src/fmha/fmha_forward.cu#L434
     using SmemLayoutVtransposed = decltype(
