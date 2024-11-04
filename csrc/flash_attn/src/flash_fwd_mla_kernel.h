@@ -663,16 +663,13 @@ template<typename Kernel_traits>
 void run_flash_splitkv_fwd_mla(Flash_fwd_params &params, cudaStream_t stream) {
     TORCH_CHECK(params.page_block_size == Kernel_traits::kBlockN);
     TORCH_CHECK(!params.unpadded_lse);
-    size_t smem_size = Kernel_traits::kSmemSize;
     const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
     BOOL_SWITCH(params.is_causal, Is_causal, [&] {
         LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
             TORCH_CHECK(!Is_local);
             ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
                 auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi>;
-                if (params.num_splits > 1) {
-                    smem_size = std::max(smem_size, size(typename Kernel_traits::SmemLayoutO{}) * sizeof(typename Kernel_traits::ElementAccum));
-                }
+                constexpr size_t smem_size = sizeof(flash::SharedStorageMLA<Kernel_traits>);
                 C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                 kernel<<<dim3(num_m_block, params.num_splits, params.b * params.h), Kernel_traits::kNThreads, smem_size, stream>>>(params);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
