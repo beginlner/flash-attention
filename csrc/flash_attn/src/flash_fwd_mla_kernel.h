@@ -195,8 +195,7 @@ __forceinline__ __device__ void store(const Params &params, const int bidb, cons
     Tensor taccOrOaccum = smem_thr_copy_Oaccum.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
     Tensor taccOsOaccum = smem_thr_copy_Oaccum.partition_D(sOaccum);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
-    // sOaccum is larger than sQ, so we need to syncthreads here
-    if constexpr (Split || kHeadDimV > kHeadDim) { __syncthreads(); }
+    __syncthreads();
 
     cute::copy(smem_tiled_copy_Oaccum, taccOrOaccum, taccOsOaccum);
 
