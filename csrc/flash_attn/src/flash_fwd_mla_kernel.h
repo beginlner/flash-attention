@@ -599,7 +599,7 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Flash_fwd_mla_par
         const int n_split_idx = batch_id == begin_idx ? begin_n_split_idx : 0;
         const int seqlen_k = params.cu_seqlens_k[batch_id];
         const int n_block_min = batch_id == begin_idx ? begin_seqlen / kBlockN : 0;
-        const int n_block_max = batch_id == end_idx ? end_seqlen / kBlockN : cute::ceil_div(seqlen_k, kBlockN);
+        const int n_block_max = batch_id == end_idx ? cute::ceil_div(end_seqlen, kBlockN) : cute::ceil_div(seqlen_k, kBlockN);
         const bool NoSplit = n_block_min == 0 && n_block_max == cute::ceil_div(seqlen_k, kBlockN);
         if (batch_id > begin_idx) {
             __syncthreads();  // Barrier between two tiles.
