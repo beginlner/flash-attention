@@ -1587,6 +1587,67 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     return {out, softmax_lse};
 }
 
+// This should match the logic in the MLA kernel.
+std::vector<at::Tensor>
+get_mla_metadata(
+        const std::vector<int> &seqlens_k,
+        const int total_num_heads  // num_heads / tp_size * (1 + nextn)
+) {
+    static constexpr int block_size_m = 64, block_size_n = 64;
+    static constexpr int fixed_overhead_num_blocks = 5;
+
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    int sm_count = dprops->multiProcessorCount;
+    int num_sm_parts = sm_count / (total_num_heads / block_size_m);
+    int batch_size = seqlens_k.size();
+    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+
+    auto tile_scheduler_metadata = torch::empty({num_sm_parts, TileSchedulerMetaDataSize}, options);
+    auto num_splits = torch::empty({batch_size}, options);
+    int *tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
+    int *num_splits_ptr = num_splits.data_ptr<int>();
+
+    std::vector<int> num_blocks;
+    num_blocks.resize(batch_size);
+    int total_num_blocks = 0;
+    for (int i = 0; i < batch_size; ++i) {
+        int num_block = cutlass::ceil_div(seqlens_k[i], block_size_n);
+        num_blocks[i] = num_block;
+        total_num_blocks += num_block + fixed_overhead_num_blocks;
+    }
+    int payload = cutlass::ceil_div(total_num_blocks, num_sm_parts) + fixed_overhead_num_blocks;
+
+    int now_idx = 0, now_block = 0, now_n_split_idx = 0;
+    for (int i = 0; i < num_sm_parts; ++i) {
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 0] = now_idx;
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 1] = now_block * block_size_n;
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 4] = now_n_split_idx;
+        int remain_payload = payload;
+        while (now_idx < batch_size) {
+            int now_remain_blocks = num_blocks[now_idx] - now_block;
+            if (remain_payload >= now_remain_blocks + fixed_overhead_num_blocks) {
+                remain_payload -= now_remain_blocks + fixed_overhead_num_blocks;
+                num_splits_ptr[now_idx] = now_n_split_idx + 1;
+                ++now_idx;
+                now_block = 0;
+                now_n_split_idx = 0;
+            } else {
+                if (remain_payload - fixed_overhead_num_blocks > 0) {
+                    now_block += remain_payload - fixed_overhead_num_blocks;
+                    ++now_n_split_idx;
+                    remain_payload = 0;
+                }
+                break;
+            }
+        }
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 2] = now_block > 0 ? now_idx : now_idx - 1;
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 3] = now_block > 0 ? now_block * block_size_n : seqlens_k[now_idx - 1];
+    }
+    TORCH_CHECK(now_idx == batch_size && now_block == 0 && now_n_split_idx == 0);
+
+    return {tile_scheduler_metadata, num_splits};
+}
+
 std::vector<at::Tensor>
 mha_fwd_kvcache_mla(
         at::Tensor &q,                               // batch_size x seqlen_q x num_heads x head_size
@@ -1754,5 +1815,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("varlen_bwd", &mha_varlen_bwd, "Backward pass (variable length)");
     m.def("fwd_kvcache", &mha_fwd_kvcache, "Forward pass, with KV-cache");
+    m.def("get_mla_metadata", &get_mla_metadata);
     m.def("fwd_kvcache_mla", &mha_fwd_kvcache_mla, "MLA inference, with KV-cache");
 }

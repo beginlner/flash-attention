@@ -591,7 +591,7 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Flash_fwd_mla_par
     int begin_seqlen = tile_scheduler_metadata.y;
     int end_idx = tile_scheduler_metadata.z;
     int end_seqlen = tile_scheduler_metadata.w;
-    if (begin_idx < 0) return;
+    if (begin_idx >= params.b) return;
     int begin_n_split_idx = tile_scheduler_metadata_ptr[4];
 
     #pragma unroll 1

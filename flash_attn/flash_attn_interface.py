@@ -1,6 +1,6 @@
 # Copyright (c) 2023, Tri Dao.
 
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -1413,6 +1413,21 @@ def flash_attn_with_blocked_kvcache(
         num_splits,
     )
     return out if not return_softmax_lse else (out, softmax_lse)
+
+
+def get_mla_metadata(
+    cache_seqlens: List[int],
+    total_num_heads: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    params:
+        cache_seqlens: [batch_size]
+        total_num_heads: num_heads // tp_size * (1 + next_n)
+    return:
+        tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (total_num_heads // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
+        num_splits (CPU Tensor): [batch_size]
+    """
+    return flash_attn_cuda.get_mla_metadata(cache_seqlens, total_num_heads)
 
 
 def flash_attn_with_blocked_kvcache_mla(
