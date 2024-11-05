@@ -39,7 +39,6 @@ template<int kHeadDim_, int kBlockM_, int kBlockN_, typename elem_type=cutlass::
         int SplitLength_=0, typename KV_type0_=cutlass::bfloat16_t, typename KV_type1_=cutlass::bfloat16_t>
 struct Flash_fwd_kernel_traits_mla {
     using Element = elem_type;
-    using OutElement = Element;
     using ElementAccum = float;
     using index_t = int64_t;
 
@@ -284,8 +283,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
     using index_t = typename Kernel_traits::index_t;
 
     const int tidx = threadIdx.x;
-    if (m_block * kBlockM >= params.seqlen_q) return;
-
     int n_block = n_block_max - 1;
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.smem_q.data()), typename Kernel_traits::SmemLayoutQ{});
@@ -576,7 +573,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
 }
 
 template<typename Kernel_traits>
-__forceinline__ __device__ void compute_attn_splitkv_mla(const Flash_fwd_mla_params &params) {
+__global__ void __launch_bounds__(256, 1, 1)
+flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
     constexpr int kBlockN = Kernel_traits::kBlockN;
     const int m_block = blockIdx.x;
     const int bidh = blockIdx.y;
@@ -586,18 +584,18 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Flash_fwd_mla_par
     auto &shared_storage = *reinterpret_cast<SharedStorageMLA<Kernel_traits> *>(shared_memory);
 
     int* tile_scheduler_metadata_ptr = params.tile_scheduler_metadata_ptr + partition_idx * TileSchedulerMetaDataSize;
-    int4 tile_scheduler_metadata = reinterpret_cast<int4 *>(tile_scheduler_metadata_ptr)[0];
+    int4 tile_scheduler_metadata = __ldg(reinterpret_cast<int4 *>(tile_scheduler_metadata_ptr));
     int begin_idx = tile_scheduler_metadata.x;
     int begin_seqlen = tile_scheduler_metadata.y;
     int end_idx = tile_scheduler_metadata.z;
     int end_seqlen = tile_scheduler_metadata.w;
     if (begin_idx >= params.b) return;
-    int begin_n_split_idx = tile_scheduler_metadata_ptr[4];
+    int begin_n_split_idx = __ldg(tile_scheduler_metadata_ptr + 4);
 
     #pragma unroll 1
     for (int batch_id = begin_idx; batch_id <= end_idx; ++batch_id) {
         const int n_split_idx = batch_id == begin_idx ? begin_n_split_idx : 0;
-        const int seqlen_k = params.cu_seqlens_k[batch_id];
+        const int seqlen_k = __ldg(params.cu_seqlens_k + batch_id);
         const int n_block_min = batch_id == begin_idx ? begin_seqlen / kBlockN : 0;
         const int n_block_max = batch_id == end_idx ? cute::ceil_div(end_seqlen, kBlockN) : cute::ceil_div(seqlen_k, kBlockN);
         const bool NoSplit = n_block_min == 0 && n_block_max == cute::ceil_div(seqlen_k, kBlockN);
@@ -610,160 +608,85 @@ __forceinline__ __device__ void compute_attn_splitkv_mla(const Flash_fwd_mla_par
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, int kBlockM, int Log_max_splits>
-__forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Flash_fwd_mla_params &params) {
-    using OutElement = typename Kernel_traits::OutElement;
-    using ElementAccum = typename Kernel_traits::ElementAccum;
-    using index_t = typename Kernel_traits::index_t;
-    constexpr int kMaxSplits = 1 << Log_max_splits;
-    constexpr int kHeadDimV = Kernel_traits::kHeadDimV;
+template<typename Element, typename ElementAccum, typename index_t, int kHeadDimV, int kMaxSplits>
+__global__ void __launch_bounds__(256, 1, 1)
+flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
     constexpr int kNThreads = 128;
 
-    static_assert(kMaxSplits <= 128, "kMaxSplits must be <= 128");
-    static_assert(kBlockM == 4 || kBlockM == 8 || kBlockM == 16 || kBlockM == 32, "kBlockM must be 4, 8, 16 or 32");
-    static_assert(kNThreads == 128, "We assume that each block has 128 threads");
-
-    // Shared memory.
-    // kBlockM + 1 instead of kBlockM to reduce bank conflicts.
-    __shared__ ElementAccum sLSE[kMaxSplits][kBlockM + 1];
-
-    // The thread and block index.
     const int tidx = threadIdx.x;
     const int bidx = blockIdx.x;
+    const int batch_idx = bidx / (params.h * params.seqlen_q);
 
-    const int actual_num_splits = params.num_splits_ptr[bidx * kBlockM / (params.h * params.seqlen_q)];
+    const int actual_num_splits = __ldg(params.num_splits_ptr + batch_idx);
+    assert(actual_num_splits <= kMaxSplits);
     if (actual_num_splits == 1) return;
-    const index_t row_offset_lse = bidx * kBlockM;
+
+    __shared__ ElementAccum sLseScale[kMaxSplits];
+
+    const index_t row_offset_lse = bidx;
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
-                                   Shape<Int<kMaxSplits>, Int<kBlockM>>{},
-                                   make_stride(params.b * params.h * params.seqlen_q, _1{}));
+                                   Shape<Int<kMaxSplits>>{}, make_stride(params.b * params.h * params.seqlen_q));
     Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
-                              Shape<Int<kBlockM>>{}, Stride<_1>{});
-    constexpr int kNLsePerThread = (kMaxSplits * kBlockM + kNThreads - 1) / kNThreads;
+                              Shape<_1>{}, Stride<_1>{});
 
-    // Read the LSE values from gmem and store them in shared memory, then tranpose them.
-    constexpr int kRowsPerLoadLSE = kNThreads / kBlockM;
-#pragma unroll
-    for (int l = 0; l < kNLsePerThread; ++l) {
-        const int row = l * kRowsPerLoadLSE + tidx / kBlockM;
-        const int col = tidx % kBlockM;
-        ElementAccum lse = (row < actual_num_splits && col < params.b * params.h * params.seqlen_q - bidx * kBlockM) ? gLSEaccum(row, col) : -INFINITY;
-        if (row < kMaxSplits) { sLSE[row][col] = lse; }
-        // if (bidx == 0 && tidx < 32) { printf("tidx = %d, row = %d, col = %d, lse = %f\n", tidx, row, col, lse); }
-    }
-    // if (bidx == 1 && tidx < 32) { printf("tidx = %d, row_offset_lse = %d, lse = %f\n", tidx, row_offset_lse, lse_accum(0)); }
-    __syncthreads();
-    Tensor lse_accum = make_tensor<ElementAccum>(Shape<Int<kNLsePerThread>>{});
-    constexpr int kRowsPerLoadTranspose = std::min(kRowsPerLoadLSE, kMaxSplits);
-    // To make sure that kMaxSplits is within 1 warp: we decide how many elements within kMaxSplits
-    // each thread should hold. If kMaxSplits = 16, then each thread holds 2 elements (128 threads,
-    // kBlockM rows, so each time we load we can load 128 / kBlockM rows).
-    // constexpr int kThreadsPerSplit = kMaxSplits / kRowsPerLoadTranspose;
-    // static_assert(kThreadsPerSplit <= 32);
-    static_assert(kRowsPerLoadTranspose <= 32);
-    static_assert(kNLsePerThread * kRowsPerLoadTranspose <= kMaxSplits);
-#pragma unroll
-    for (int l = 0; l < kNLsePerThread; ++l) {
-        const int row = l * kRowsPerLoadTranspose + tidx % kRowsPerLoadTranspose;
-        const int col = tidx / kRowsPerLoadTranspose;
-        lse_accum(l) = (row < kMaxSplits && col < kBlockM) ? sLSE[row][col] : -INFINITY;
-        // if (bidx == 0 && tidx < 32) { printf("tidx = %d, row = %d, col = %d, lse = %f\n", tidx, row, col, lse_accum(l)); }
-    }
+    int warp_idx = cutlass::canonical_warp_idx_sync();
+    if (warp_idx == 0) {
+        constexpr int kNLsePerThread = cute::ceil_div(kMaxSplits, 32);
 
-    // Compute the logsumexp of the LSE along the split dimension.
-    ElementAccum lse_max = lse_accum(0);
-#pragma unroll
-    for (int l = 1; l < kNLsePerThread; ++l) { lse_max = max(lse_max, lse_accum(l)); }
-    MaxOp<float> max_op;
-    lse_max = Allreduce<kRowsPerLoadTranspose>::run(lse_max, max_op);
-    lse_max = lse_max == -INFINITY ? 0.0f : lse_max;  // In case all local LSEs are -inf
-    float lse_sum = expf(lse_accum(0) - lse_max);
-#pragma unroll
-    for (int l = 1; l < kNLsePerThread; ++l) { lse_sum += expf(lse_accum(l) - lse_max); }
-    SumOp<float> sum_op;
-    lse_sum = Allreduce<kRowsPerLoadTranspose>::run(lse_sum, sum_op);
-    // For the case where all local lse == -INFINITY, we want to set lse_logsum to INFINITY. Otherwise
-    // lse_logsum is log(0.0) = -INFINITY and we get NaN when we do lse_accum(l) - lse_logsum.
-    ElementAccum lse_logsum = (lse_sum == 0.f || lse_sum != lse_sum) ? INFINITY : logf(lse_sum) + lse_max;
-    // if (bidx == 0 && tidx < 32) { printf("tidx = %d, lse = %f, lse_max = %f, lse_logsum = %f\n", tidx, lse_accum(0), lse_max, lse_logsum); }
-    if (tidx % kRowsPerLoadTranspose == 0 && tidx / kRowsPerLoadTranspose < kBlockM && tidx / kRowsPerLoadTranspose < params.b * params.h * params.seqlen_q - bidx * kBlockM) { gLSE(tidx / kRowsPerLoadTranspose) = lse_logsum; }
-    // Store the scales exp(lse - lse_logsum) in shared memory.
-#pragma unroll
-    for (int l = 0; l < kNLsePerThread; ++l) {
-        const int row = l * kRowsPerLoadTranspose + tidx % kRowsPerLoadTranspose;
-        const int col = tidx / kRowsPerLoadTranspose;
-        if (row < actual_num_splits && col < kBlockM) { sLSE[row][col] = expf(lse_accum(l) - lse_logsum); }
+        float local_lse[kNLsePerThread];
+        for (int i = 0; i < kNLsePerThread; ++i) {
+            const int split = i * 32 + tidx;
+            local_lse[i] = split < actual_num_splits ? gLSEaccum(split) : -INFINITY;
+        }
+
+        float max_lse = -INFINITY;
+        for (int i = 0; i < kNLsePerThread; ++i) max_lse = max(max_lse, local_lse[i]);
+        for (int offset = 16; offset >= 1; offset /= 2) max_lse = max(max_lse, __shfl_xor_sync(uint32_t(-1), max_lse, offset));
+        max_lse = max_lse == -INFINITY ? 0.0f : max_lse;  // In case all local LSEs are -inf
+
+        float sum_lse = 0;
+        for (int i = 0; i < kNLsePerThread; ++i) sum_lse = sum_lse + expf(local_lse[i] - max_lse);
+        for (int offset = 16; offset >= 1; offset /= 2) sum_lse = sum_lse + __shfl_xor_sync(uint32_t(-1), sum_lse, offset);
+
+        float global_lse = (sum_lse == 0.f || sum_lse != sum_lse) ? INFINITY : logf(sum_lse) + max_lse;
+        if (tidx == 0) gLSE(0) = global_lse;
+
+        for (int i = 0; i < kNLsePerThread; ++i) {
+            const int split = i * 32 + tidx;
+            if (split < actual_num_splits) sLseScale[split] = expf(local_lse[i] - global_lse);
+        }
     }
     __syncthreads();
 
-    const index_t row_offset_oaccum = bidx * kBlockM * params.d_v;
+    const index_t row_offset_oaccum = bidx * kHeadDimV;
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
-                                 Shape<Int<kBlockM>, Int<kHeadDimV>>{},
-                                 Stride<Int<kHeadDimV>, _1>{});
-    constexpr int kBlockN = kNThreads / kBlockM;
-    using GmemLayoutAtomOaccum = Layout<Shape<Int<kBlockM>, Int<kBlockN>>, Stride<Int<kBlockN>, _1>>;
+                                 Shape<Int<kHeadDimV>>{}, Stride<_1>{});
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
-            Copy_Atom<DefaultCopy, ElementAccum>{},
-            GmemLayoutAtomOaccum{},
-            Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+            Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
+            Layout<Shape<Int<kNThreads>>>{},
+            Layout<Shape<_4>>{}));
     GmemTiledCopyOaccum gmem_tiled_copy_Oaccum;
     auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_S(gOaccum);
-    Tensor tOrO = make_tensor<ElementAccum>(shape(tOgOaccum));
     Tensor tOrOaccum = make_tensor<ElementAccum>(shape(tOgOaccum));
+    Tensor tOrO = make_tensor<ElementAccum>(shape(tOgOaccum));
     clear(tOrO);
 
-    // Predicates
-    Tensor cOaccum = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDimV>>{});
-    // Repeat the partitioning with identity layouts
-    Tensor tOcOaccum = gmem_thr_copy_Oaccum.partition_S(cOaccum);
-    Tensor tOpOaccum = make_tensor<bool>(make_shape(size<2>(tOgOaccum)));
-    // Load Oaccum in then scale and accumulate to O
     for (int split = 0; split < actual_num_splits; ++split) {
-        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true>(
-                gmem_tiled_copy_Oaccum, tOgOaccum, tOrOaccum, tOcOaccum, tOpOaccum, params.b * params.h * params.seqlen_q - bidx * kBlockM
-        );
-#pragma unroll
-        for (int m = 0; m < size<1>(tOrOaccum); ++m) {
-            int row = get<0>(tOcOaccum(0, m, 0));
-            ElementAccum lse_scale = sLSE[split][row];
-#pragma unroll
-            for (int k = 0; k < size<2>(tOrOaccum); ++k) {
-#pragma unroll
-                for (int i = 0; i < size<0>(tOrOaccum); ++i) {
-                    tOrO(i, m, k) += lse_scale * tOrOaccum(i, m, k);
-                }
-            }
-            // if (cute::thread0()) { printf("lse_scale = %f, %f\n", sLSE[split][0], sLSE[split][1]); print(tOrOaccum); }
+        cute::copy(tOgOaccum, tOrOaccum);
+        ElementAccum lse_scale = sLseScale[split];
+        for (int i = 0; i < size(tOrO); ++i) {
+            tOrO(i) += lse_scale * tOrOaccum(i);
         }
-        tOgOaccum.data() = tOgOaccum.data() + params.b * params.h * params.seqlen_q * params.d_v;
+        tOgOaccum.data() = tOgOaccum.data() + params.b * params.h * params.seqlen_q * kHeadDimV;
     }
-    // if (cute::thread0()) { print_tensor(tOrO); }
 
-    Tensor rO = flash::convert_type<OutElement>(tOrO);
-    // Write to gO
-#pragma unroll
-    for (int m = 0; m < size<1>(rO); ++m) {
-        const int idx = bidx * kBlockM + get<0>(tOcOaccum(0, m, 0));
-        if (idx < params.b * params.h * params.seqlen_q) {
-            const int batch_idx = idx / (params.h * params.seqlen_q);
-            const int head_idx = (idx - batch_idx * (params.h * params.seqlen_q)) / params.seqlen_q;
-            // The index to the rows of Q
-            const int row = idx - batch_idx * (params.h * params.seqlen_q) - head_idx * params.seqlen_q;
-            auto o_ptr = reinterpret_cast<OutElement *>(params.o_ptr) + batch_idx * params.o_batch_stride
-                         + head_idx * params.o_head_stride + row * params.o_row_stride;
-#pragma unroll
-            for (int k = 0; k < size<2>(rO); ++k) {
-                const int col = get<1>(tOcOaccum(0, m, k));
-                Tensor gO = make_tensor(make_gmem_ptr(o_ptr + col),
-                                        Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
-                // TODO: Should check if this is using vectorized store, but it seems pretty fast
-                copy(rO(_, m, k), gO);
-                // if (bidx == 0 && tidx == 0) { printf("tidx = %d, idx = %d, batch_idx = %d, head_idx = %d, row = %d, col = %d\n", tidx, idx, batch_idx, head_idx, row, col); print(rO(_, m, k)); print(gO); }
-                // reinterpret_cast<uint64_t *>(o_ptr)[col / 4] = recast<uint64_t>(rO)(0, m, k);
-            }
-        }
-    }
+    Tensor rO = flash::convert_type<Element>(tOrO);
+    const int head_idx = (bidx - batch_idx * (params.h * params.seqlen_q)) / params.seqlen_q;
+    const int row = bidx - batch_idx * (params.h * params.seqlen_q) - head_idx * params.seqlen_q;
+    auto o_ptr = reinterpret_cast<Element *>(params.o_ptr) + batch_idx * params.o_batch_stride + head_idx * params.o_head_stride + row * params.o_row_stride;
+    Tensor gO = make_tensor(make_gmem_ptr(o_ptr + tidx * 4), Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
+    cute::copy(rO, gO);
 }
 
 } // namespace flash
@@ -771,37 +694,20 @@ __forceinline__ __device__ void combine_attn_seqk_parallel_mla(const Flash_fwd_m
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Kernel_traits>
-__global__ void __launch_bounds__(256, 1, 1)
-flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
-    flash::compute_attn_splitkv_mla<Kernel_traits>(params);
-}
-
-template<typename Kernel_traits, int kBlockM, int Log_max_splits>
-__global__ void __launch_bounds__(256, 1, 1)
-flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
-    static_assert(Log_max_splits >= 1);
-    flash::combine_attn_seqk_parallel_mla<Kernel_traits, kBlockM, Log_max_splits>(params);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename Kernel_traits>
 void run_flash_splitkv_fwd_mla(Flash_fwd_mla_params &params, cudaStream_t stream) {
     FLASH_ASSERT(params.page_block_size == Kernel_traits::kBlockN);
     const int num_m_block = cute::ceil_div(params.seqlen_q, Kernel_traits::kBlockM);
-    auto kernel = &flash_fwd_splitkv_mla_kernel<Kernel_traits>;
+    auto kernel = &flash::flash_fwd_splitkv_mla_kernel<Kernel_traits>;
     constexpr size_t smem_size = sizeof(flash::SharedStorageMLA<Kernel_traits>);
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     kernel<<<dim3(num_m_block, params.h, params.num_sm_parts), Kernel_traits::kNThreads, smem_size, stream>>>(params);
     CHECK_CUDA_KERNEL_LAUNCH();
 
-    // We want kBlockM to be as small as possible for more parallelism.
-    // With 128 threads we can load 512 elements at a time, so if headdim is divisible by 128, kBlockM = 4.
-    // If headdim is divisible by 64, then we set kBlockM = 8, etc.
-    constexpr static int kBlockM = Kernel_traits::kHeadDimV % 128 == 0 ? 4 : (Kernel_traits::kHeadDimV % 64 == 0 ? 8 : 16);
-    dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
-    NUM_SPLITS_SWITCH(params.num_sm_parts, kLogMaxSplits, [&] {
-        flash_fwd_splitkv_mla_combine_kernel<Kernel_traits, kBlockM, kLogMaxSplits><<<grid_combine, 128, 0, stream>>>(params);
+    dim3 grid_combine(params.b * params.h * params.seqlen_q);
+    MLA_NUM_SPLITS_SWITCH(params.num_sm_parts, kMaxSplits, [&] {
+        auto combine_kernel = &flash::flash_fwd_splitkv_mla_combine_kernel<
+                typename Kernel_traits::Element, typename Kernel_traits::ElementAccum, typename Kernel_traits::index_t, Kernel_traits::kHeadDimV, kMaxSplits>;
+        combine_kernel<<<grid_combine, 128, 0, stream>>>(params);
     });
     CHECK_CUDA_KERNEL_LAUNCH();
 }
