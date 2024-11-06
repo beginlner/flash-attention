@@ -1598,7 +1598,7 @@ get_mla_metadata(
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
     int sm_count = dprops->multiProcessorCount;
-    int num_sm_parts = sm_count / (total_num_heads / block_size_m);
+    int num_sm_parts = sm_count / cutlass::ceil_div(total_num_heads, block_size_m);
     int batch_size = seqlens_k.size();
     auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
 
