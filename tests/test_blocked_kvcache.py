@@ -2,11 +2,13 @@ import math
 import triton
 import torch
 import random
-from flash_attn.flash_attn_interface import get_kvcache_block_size, flash_attn_with_blocked_kvcache
+from flash_attn.flash_attn_interface import *
 
-b, s, h_q, h_kv = 132, 4096, 64, 1
+b, s, h_q, h_kv = 66, 2048, 64, 1
+s_q = 2
+causal = True
 dtype = torch.bfloat16
-device = torch.device("cuda:0")
+device = torch.device("cuda:5")
 torch.set_default_dtype(dtype)
 torch.set_default_device(device)
 torch.cuda.set_device(device)
@@ -14,14 +16,15 @@ torch.manual_seed(0)
 random.seed(0)
 
 cache_seqlens = torch.full((b,), s, dtype=torch.int32)
-# for i in range(b):
-#     cache_seqlens[i] = min(max(random.normalvariate(3000, 1000), 1), 20480)
-# cache_seqlens[0] = 131072
+for i in range(b):
+    cache_seqlens[i] = min(max(random.normalvariate(1000, 1000), s_q), 20480)
+cache_seqlens[0] = 65536
 cache_seqlens = torch.sort(cache_seqlens, descending=True).values
 total_seqlens = cache_seqlens.sum().item()
+mean_seqlens = cache_seqlens.float().mean().int().item()
 max_seqlen = cache_seqlens.max().item()
 max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
-print("max:", max_seqlen, "sum:", total_seqlens, cache_seqlens.tolist())
+print("max:", max_seqlen, "sum:", total_seqlens, "mean:", mean_seqlens)
 
 
 def calc_diff(x, y):
@@ -44,53 +47,85 @@ def assert_close(x, y, name=""):
 
 def timer(func, name=""):
     t = triton.testing.do_bench(func, fast_flush=False)
-    FLOPS = total_seqlens * h_q * (d + v_dim) * 2
+    FLOPS = s_q * total_seqlens * h_q * (d + v_dim) * 2
     bytes = total_seqlens * h_kv * d * (torch.finfo(dtype).bits // 8)
 
-    print(f"{t} ms, {FLOPS / 10 ** 9 / t} tflops, {bytes / 10 ** 6 / t} GB/s")
+    print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} tflops, {bytes / 10 ** 6 / t:.0f} GB/s")
     return t
 
 
-def scaled_dot_product_attention(query, key, value) -> torch.Tensor:
+def scaled_dot_product_attention(query, key, value, is_causal=False):
+    query = query.float()
+    key = key.float()
+    value = value.float()
+    key = key.repeat_interleave(h_q // h_kv, dim=0)
+    value = value.repeat_interleave(h_q // h_kv, dim=0)
     attn_weight = query @ key.transpose(-2, -1) / math.sqrt(query.size(-1))
-    attn_weight = torch.softmax(attn_weight, dim=-1)
-    return attn_weight @ value
+    if is_causal:
+        s_q = query.shape[-2]
+        s_k = key.shape[-2]
+        attn_bias = torch.zeros(s_q, s_k, dtype=query.dtype)
+        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool).tril(diagonal=s_k - s_q)
+        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        attn_bias.to(query.dtype)
+        attn_weight += attn_bias
+    lse = attn_weight.logsumexp(dim=-1)
+    attn_weight = torch.softmax(attn_weight, dim=-1, dtype=torch.float32)
+    return attn_weight @ value, lse
 
 
 @torch.inference_mode()
 def test_flash_attention(d, v_dim):
     block_size = get_kvcache_block_size(d)
-    print(b, s, h_q, h_kv, d, v_dim)
+    print(b, s_q, s, h_q, h_kv, d, v_dim, causal)
 
-    s_q = 1
     q = torch.randn(b, s_q, h_q, d)
 
     block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
-    # block_table = torch.nn.functional.pad(block_table, (0, 32768 // block_size))
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     blocked_v = blocked_k[..., :v_dim]
+    try:
+        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.tolist(), s_q * h_q)
+        tile_scheduler_metadata = tile_scheduler_metadata.cuda()
+        num_splits = num_splits.cuda()
+        # print(tile_scheduler_metadata)
+        # print(num_splits)
+        # print(tile_scheduler_metadata.shape, num_splits.shape)
+        # print(cache_seqlens)
+    except:
+        pass
 
     def blocked_flash_attn():
-        return flash_attn_with_blocked_kvcache(
-            q, blocked_k, blocked_v, block_table, cache_seqlens, causal=True,
-            # window_size=(511, 0),
-        )
+        try:
+            return flash_attn_with_blocked_kvcache_mla(
+                q, blocked_k, block_table, cache_seqlens, v_dim,
+                tile_scheduler_metadata, num_splits, causal=causal, return_softmax_lse=True,
+            )
+        except:
+            return flash_attn_with_blocked_kvcache(
+                q, blocked_k, blocked_v, block_table, cache_seqlens, causal=causal, return_softmax_lse=True,
+            )
 
     def torch_attn():
-        out = torch.empty(b, s_q, h_q, v_dim)
+        out = torch.empty(b, s_q, h_q, v_dim, dtype=torch.float32)
+        lse = torch.empty(b, h_q, s_q, dtype=torch.float32)
         for i in range(b):
             begin = i * max_seqlen_pad
             end = begin + cache_seqlens[i]
-            out[i] = scaled_dot_product_attention(
+            O, LSE = scaled_dot_product_attention(
                 q[i].transpose(0, 1),
                 blocked_k.view(-1, h_kv, d)[begin:end].transpose(0, 1),
                 blocked_v.view(-1, h_kv, v_dim)[begin:end].transpose(0, 1),
-            ).transpose(0, 1)
-        return out
+                is_causal=causal,
+            )
+            out[i] = O.transpose(0, 1)
+            lse[i] = LSE
+        return out, lse
 
-    out_blocked_flash = blocked_flash_attn()
-    out_torch_attn = torch_attn()
-    assert_close(out_blocked_flash, out_torch_attn, "blocked_flash_attn")
+    out_flash, lse_flash = blocked_flash_attn()
+    out_torch, lse_torch = torch_attn()
+    assert_close(out_flash, out_torch, "out")
+    assert_close(lse_flash, lse_torch, "lse")
 
     timer(blocked_flash_attn)
     timer(blocked_flash_attn)
