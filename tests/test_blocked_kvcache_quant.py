@@ -6,6 +6,7 @@ from flash_attn.flash_attn_interface import get_kvcache_block_size, flash_attn_w
 
 b, s, h_q, h_kv, d = 66, 2048, 128, 1, 576
 v_dim = 512
+s_q = 1
 k0_bits, k1_bits = 8, 16
 k0_dtype, k1_dtype = "int8", "bfloat16"
 split_length = 512
@@ -68,7 +69,6 @@ def create_k():
 def test_flash_attention():
     print(b, s, h_q, h_kv, d, v_dim, split_length)
 
-    s_q = 1
     q = torch.randn(b, s_q, h_q, d)
     compressed_k, k = create_k()
     compressed_blocked_k = compressed_k.view(-1, block_size, h_kv, compressed_head_size)
