@@ -248,14 +248,20 @@
 
 #define MLA_NUM_SPLITS_SWITCH(NUM_SPLITS, NAME, ...) \
   [&] {                                              \
-    if (NUM_SPLITS == 33) {                          \
-      constexpr static int NAME = 33;                \
+    if (NUM_SPLITS <= 32) {                          \
+      constexpr static int NAME = 32;                \
       return __VA_ARGS__();                          \
-    } else if (NUM_SPLITS == 66) {                   \
-      constexpr static int NAME = 66;                \
+    } else if (NUM_SPLITS <= 64) {                   \
+      constexpr static int NAME = 64;                \
       return __VA_ARGS__();                          \
-    } else if (NUM_SPLITS == 132) {                  \
-      constexpr static int NAME = 132;               \
+    } else if (NUM_SPLITS <= 96) {                   \
+      constexpr static int NAME = 96;                \
+      return __VA_ARGS__();                          \
+    } else if (NUM_SPLITS <= 128) {                  \
+      constexpr static int NAME = 128;               \
+      return __VA_ARGS__();                          \
+    } else if (NUM_SPLITS <= 160) {                  \
+      constexpr static int NAME = 160;               \
       return __VA_ARGS__();                          \
     } else {                                         \
       FLASH_ASSERT(false);                           \
