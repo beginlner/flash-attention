@@ -1657,11 +1657,11 @@ mha_fwd_kvcache_mla(
         const int kvcache_quantization_type,         // 0 for no quantization; 1 for int4 + int8
         const int kvcache_quantization_split_length,
         const at::Tensor &seqlens_k,                 // batch_size
-        at::Tensor &block_table,                     // batch_size x max_num_blocks_per_seq
+        const at::Tensor &block_table,               // batch_size x max_num_blocks_per_seq
         c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size_v
         const float softmax_scale,
-        at::Tensor &tile_scheduler_metadata,         // num_sm_parts x TileSchedulerMetaDataSize
-        at::Tensor &num_splits                       // batch_size + 1
+        const at::Tensor &tile_scheduler_metadata,   // num_sm_parts x TileSchedulerMetaDataSize
+        const at::Tensor &num_splits                 // batch_size + 1
 ) {
     auto dprops = at::cuda::getCurrentDeviceProperties();
     bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
