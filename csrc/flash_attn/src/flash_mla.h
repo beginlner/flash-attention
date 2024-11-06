@@ -6,7 +6,8 @@ struct Flash_fwd_mla_params {
     using index_t = int64_t;
 
     int b, seqlen_q, d, d_v;
-    int h, h_h_k_ratio;
+    int h, h_h_k_ratio, ngroups;
+    bool is_causal;
     float scale_softmax, scale_softmax_log2;
     int * __restrict__ cu_seqlens_k;
 

@@ -1442,6 +1442,7 @@ def flash_attn_with_blocked_kvcache_mla(
     kvcache_quantization_split_length: int = 0,
     out: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    causal: bool = False,
     return_softmax_lse: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if softmax_scale is None:
@@ -1457,6 +1458,7 @@ def flash_attn_with_blocked_kvcache_mla(
         block_table,
         out,
         softmax_scale,
+        causal,
         tile_scheduler_metadata,
         num_splits,
     )

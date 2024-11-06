@@ -1660,6 +1660,7 @@ mha_fwd_kvcache_mla(
         const at::Tensor &block_table,               // batch_size x max_num_blocks_per_seq
         c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size_v
         const float softmax_scale,
+        bool is_causal,
         const at::Tensor &tile_scheduler_metadata,   // num_sm_parts x TileSchedulerMetaDataSize
         const at::Tensor &num_splits                 // batch_size + 1
 ) {
@@ -1685,8 +1686,8 @@ mha_fwd_kvcache_mla(
 
     const auto sizes = q.sizes();
     const int batch_size = sizes[0];
-    int seqlen_q = sizes[1];
-    int num_heads = sizes[2];
+    const int seqlen_q_ori = sizes[1];
+    const int num_heads_ori = sizes[2];
     const int head_size = sizes[3];
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
@@ -1695,21 +1696,17 @@ mha_fwd_kvcache_mla(
     const int max_num_blocks_per_seq = block_table.size(1);
     const int num_blocks = kcache.size(0);
     const int page_block_size = kcache.size(1);
-    const int seqlen_k = max_num_blocks_per_seq * page_block_size;
     const int num_heads_k = kcache.size(2);
-    const int batch_size_c = batch_size;
     TORCH_CHECK(batch_size > 0, "batch size must be postive");
-    TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
+    TORCH_CHECK(num_heads_ori % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
-    // Faster to transpose q from (b, 1, (nheads_kv ngroups), d) to (b, ngroups, nheads_kv, d) in this case
-    // H/t Daniel Haziza
-    const int seqlenq_ngroups_swapped = seqlen_q == 1 && num_heads > num_heads_k;
-    const int ngroups = num_heads / num_heads_k;
-    if (seqlenq_ngroups_swapped) {
-        q = q.reshape({batch_size, num_heads_k, ngroups, head_size}).transpose(1, 2);
-        seqlen_q = ngroups;
-        num_heads = num_heads_k;
-    }
+    if (seqlen_q_ori == 1) { is_causal = false; }
+
+    const int ngroups = num_heads_ori / num_heads_k;
+    const int seqlen_q = seqlen_q_ori * ngroups;
+    const int num_heads = num_heads_k;
+    q = q.view({batch_size, seqlen_q_ori, num_heads_k, ngroups, head_size}).transpose(1, 2)
+            .reshape({batch_size, seqlen_q, num_heads, head_size});
 
     int head_size_k = head_size;
     if (kvcache_quantization_type > 0) {
@@ -1732,9 +1729,8 @@ mha_fwd_kvcache_mla(
         CHECK_DEVICE(out);
         TORCH_CHECK(out.stride(-1) == 1, "Output tensor must have contiguous last dimension");
         CHECK_SHAPE(out, batch_size, sizes[1], sizes[2], head_size_v);
-        if (seqlenq_ngroups_swapped) {
-            out = out.reshape({batch_size, num_heads_k, ngroups, head_size_v}).transpose(1, 2);
-        }
+        out = out.view({batch_size, seqlen_q_ori, num_heads_k, ngroups, head_size_v}).transpose(1, 2)
+                .view({batch_size, seqlen_q, num_heads, head_size_v});
     } else {
         out = torch::empty({batch_size, seqlen_q, num_heads, head_size_v}, q.options());
     }
@@ -1756,6 +1752,8 @@ mha_fwd_kvcache_mla(
     params.cu_seqlens_k = seqlens_k.data_ptr<int>();
     params.h = num_heads;
     params.h_h_k_ratio = num_heads / num_heads_k;
+    params.ngroups = ngroups;
+    params.is_causal = is_causal;
     params.d = head_size;
     params.d_v = head_size_v;
     params.scale_softmax = softmax_scale;
@@ -1802,10 +1800,11 @@ mha_fwd_kvcache_mla(
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     run_mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576>(params, stream);
 
-    if (seqlenq_ngroups_swapped) {
-        out = out.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, head_size_v});
-        softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * seqlen_q, 1});
-    }
+    out = out.view({batch_size, seqlen_q_ori, ngroups, num_heads_k, head_size_v}).transpose(2, 3)
+            .reshape({batch_size, seqlen_q_ori, num_heads_ori, head_size_v});
+    softmax_lse = softmax_lse.view({batch_size, num_heads_k, seqlen_q_ori, ngroups}).transpose(2, 3)
+            .reshape({batch_size, num_heads_ori, seqlen_q_ori});
+
     return {out, softmax_lse};
 }
 
