@@ -1425,7 +1425,7 @@ def get_mla_metadata(
         total_num_heads: num_heads // tp_size * (1 + next_n)
     return:
         tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (total_num_heads // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
-        num_splits (CPU Tensor): [batch_size]
+        num_splits (CPU Tensor): [batch_size + 1]
     """
     return flash_attn_cuda.get_mla_metadata(cache_seqlens, total_num_heads)
 

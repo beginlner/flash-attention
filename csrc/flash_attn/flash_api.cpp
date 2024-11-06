@@ -1591,7 +1591,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 std::vector<at::Tensor>
 get_mla_metadata(
         const std::vector<int> &seqlens_k,
-        const int total_num_heads  // num_heads / tp_size * (1 + nextn)
+        const int total_num_heads
 ) {
     static constexpr int block_size_m = 64, block_size_n = 64;
     static constexpr int fixed_overhead_num_blocks = 5;
@@ -1603,7 +1603,7 @@ get_mla_metadata(
     auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
 
     auto tile_scheduler_metadata = torch::empty({num_sm_parts, TileSchedulerMetaDataSize}, options);
-    auto num_splits = torch::empty({batch_size}, options);
+    auto num_splits = torch::empty({batch_size + 1}, options);
     int *tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
     int *num_splits_ptr = num_splits.data_ptr<int>();
 
@@ -1618,6 +1618,7 @@ get_mla_metadata(
     int payload = cutlass::ceil_div(total_num_blocks, num_sm_parts) + fixed_overhead_num_blocks;
 
     int now_idx = 0, now_block = 0, now_n_split_idx = 0;
+    num_splits_ptr[0] = 0;
     for (int i = 0; i < num_sm_parts; ++i) {
         tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 0] = now_idx;
         tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 1] = now_block * block_size_n;
@@ -1626,8 +1627,8 @@ get_mla_metadata(
         while (now_idx < batch_size) {
             int now_remain_blocks = num_blocks[now_idx] - now_block;
             if (remain_payload >= now_remain_blocks + fixed_overhead_num_blocks) {
+                num_splits_ptr[now_idx + 1] = num_splits_ptr[now_idx] + (now_n_split_idx + 1);
                 remain_payload -= now_remain_blocks + fixed_overhead_num_blocks;
-                num_splits_ptr[now_idx] = now_n_split_idx + 1;
                 ++now_idx;
                 now_block = 0;
                 now_n_split_idx = 0;
@@ -1660,7 +1661,7 @@ mha_fwd_kvcache_mla(
         c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size_v
         const float softmax_scale,
         at::Tensor &tile_scheduler_metadata,         // num_sm_parts x TileSchedulerMetaDataSize
-        at::Tensor &num_splits                       // batch_size / nextn
+        at::Tensor &num_splits                       // batch_size + 1
 ) {
     auto dprops = at::cuda::getCurrentDeviceProperties();
     bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
@@ -1790,8 +1791,8 @@ mha_fwd_kvcache_mla(
     CHECK_CONTIGUOUS(num_splits);
     params.num_splits_ptr = num_splits.data_ptr<int>();
 
-    at::Tensor softmax_lse_accum = torch::empty({params.num_sm_parts, batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
-    at::Tensor out_accum = torch::empty({params.num_sm_parts, batch_size, num_heads, seqlen_q, head_size_v}, opts.dtype(at::kFloat));
+    at::Tensor softmax_lse_accum = torch::empty({batch_size + params.num_sm_parts, num_heads, seqlen_q}, opts.dtype(at::kFloat));
+    at::Tensor out_accum = torch::empty({batch_size + params.num_sm_parts, num_heads, seqlen_q, head_size_v}, opts.dtype(at::kFloat));
     params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
     params.oaccum_ptr = out_accum.data_ptr();
 

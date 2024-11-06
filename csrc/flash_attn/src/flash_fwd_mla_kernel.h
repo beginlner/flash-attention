@@ -190,6 +190,8 @@ __forceinline__ __device__ void store(const Flash_fwd_mla_params &params, const 
 
     // Epilogue
 
+    const int split_offset = __ldg(params.num_splits_ptr + bidb);
+
     Tensor lse = softmax.template normalize_softmax_lse</*Is_dropout=*/false, Split>(acc_o, params.scale_softmax);
     // if (cute::thread0()) { print(lse); }
 
@@ -212,13 +214,14 @@ __forceinline__ __device__ void store(const Flash_fwd_mla_params &params, const 
     cute::copy(smem_tiled_copy_Oaccum, taccOrOaccum, taccOsOaccum);
 
     const index_t row_offset_o = bidb * params.o_batch_stride + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
-    const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM) * params.d_v;
-    const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
+    const index_t row_offset_oaccum = (((split_offset + n_split_idx) * params.h + bidh) * params.seqlen_q + m_block * kBlockM) * params.d_v;
+    const index_t row_offset_lse = (bidb * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
+    const index_t row_offset_lseaccum = ((split_offset + n_split_idx) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
 
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
                                  Shape<Int<kBlockM>, Int<kHeadDimV>>{},
                                  make_stride(Split ? kHeadDimV : params.o_row_stride, _1{}));
-    Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(Split ? params.softmax_lseaccum_ptr : params.softmax_lse_ptr) + row_offset_lseaccum),
+    Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(Split ? params.softmax_lseaccum_ptr : params.softmax_lse_ptr) + (Split ? row_offset_lseaccum : row_offset_lse)),
                                    Shape<Int<kBlockM>>{}, Stride<_1>{});
     // if (tidx == 0) { printf("row_offset_o = %d, bidh = %d, gOaccum = %p\n", row_offset_o, bidh, gOaccum.data()); }
 
@@ -615,17 +618,21 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
 
     const int tidx = threadIdx.x;
     const int bidx = blockIdx.x;
-    const int batch_idx = bidx / (params.h * params.seqlen_q);
+    const int hs = params.h * params.seqlen_q;
+    const int batch_idx = bidx / hs;
+    const int hs_idx = bidx % hs;
 
-    const int actual_num_splits = __ldg(params.num_splits_ptr + batch_idx);
+    const int split_offset = __ldg(params.num_splits_ptr + batch_idx);
+    const int actual_num_splits = __ldg(params.num_splits_ptr + batch_idx + 1) - split_offset;
     assert(actual_num_splits <= kMaxSplits);
     if (actual_num_splits == 1) return;
 
     __shared__ ElementAccum sLseScale[kMaxSplits];
 
+    const index_t row_offset_lseaccum = split_offset * hs + hs_idx;
     const index_t row_offset_lse = bidx;
-    Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lse),
-                                   Shape<Int<kMaxSplits>>{}, make_stride(params.b * params.h * params.seqlen_q));
+    Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lseaccum_ptr) + row_offset_lseaccum),
+                                   Shape<Int<kMaxSplits>>{}, make_stride(hs));
     Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
                               Shape<_1>{}, Stride<_1>{});
 
@@ -658,7 +665,7 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
     }
     __syncthreads();
 
-    const index_t row_offset_oaccum = bidx * kHeadDimV;
+    const index_t row_offset_oaccum = (split_offset * hs + hs_idx) * kHeadDimV;
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
                                  Shape<Int<kHeadDimV>>{}, Stride<_1>{});
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
@@ -678,12 +685,12 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
         for (int i = 0; i < size(tOrO); ++i) {
             tOrO(i) += lse_scale * tOrOaccum(i);
         }
-        tOgOaccum.data() = tOgOaccum.data() + params.b * params.h * params.seqlen_q * kHeadDimV;
+        tOgOaccum.data() = tOgOaccum.data() + hs * kHeadDimV;
     }
 
     Tensor rO = flash::convert_type<Element>(tOrO);
-    const int head_idx = (bidx - batch_idx * (params.h * params.seqlen_q)) / params.seqlen_q;
-    const int row = bidx - batch_idx * (params.h * params.seqlen_q) - head_idx * params.seqlen_q;
+    const int head_idx = (bidx - batch_idx * hs) / params.seqlen_q;
+    const int row = bidx - batch_idx * hs - head_idx * params.seqlen_q;
     auto o_ptr = reinterpret_cast<Element *>(params.o_ptr) + batch_idx * params.o_batch_stride + head_idx * params.o_head_stride + row * params.o_row_stride;
     Tensor gO = make_tensor(make_gmem_ptr(o_ptr + tidx * 4), Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
     cute::copy(rO, gO);
