@@ -1590,17 +1590,22 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 // This should match the logic in the MLA kernel.
 std::vector<at::Tensor>
 get_mla_metadata(
-        const std::vector<int> &seqlens_k,
+        const at::Tensor &seqlens_k,
         const int total_num_heads
 ) {
     static constexpr int block_size_m = 64, block_size_n = 64;
     static constexpr int fixed_overhead_num_blocks = 5;
 
+    TORCH_CHECK(seqlens_k.is_cpu());
+    TORCH_CHECK(seqlens_k.is_contiguous());
+    TORCH_CHECK(seqlens_k.dtype() == torch::kInt32);
+    int batch_size = seqlens_k.size(0);
+    int *seqlens_k_ptr = seqlens_k.data_ptr<int>();
+    auto options = seqlens_k.options();
+
     auto dprops = at::cuda::getCurrentDeviceProperties();
     int sm_count = dprops->multiProcessorCount;
     int num_sm_parts = sm_count / cutlass::ceil_div(total_num_heads, block_size_m);
-    int batch_size = seqlens_k.size();
-    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
 
     auto tile_scheduler_metadata = torch::empty({num_sm_parts, TileSchedulerMetaDataSize}, options);
     auto num_splits = torch::empty({batch_size + 1}, options);
@@ -1611,7 +1616,7 @@ get_mla_metadata(
     num_blocks.resize(batch_size);
     int total_num_blocks = 0;
     for (int i = 0; i < batch_size; ++i) {
-        int num_block = cutlass::ceil_div(seqlens_k[i], block_size_n);
+        int num_block = cutlass::ceil_div(seqlens_k_ptr[i], block_size_n);
         num_blocks[i] = num_block;
         total_num_blocks += num_block + fixed_overhead_num_blocks;
     }
@@ -1642,7 +1647,7 @@ get_mla_metadata(
             }
         }
         tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 2] = now_block > 0 ? now_idx : now_idx - 1;
-        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 3] = now_block > 0 ? now_block * block_size_n : seqlens_k[now_idx - 1];
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 3] = now_block > 0 ? now_block * block_size_n : seqlens_k_ptr[now_idx - 1];
     }
     TORCH_CHECK(now_idx == batch_size && now_block == 0 && now_n_split_idx == 0);
 

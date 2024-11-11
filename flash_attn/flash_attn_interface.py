@@ -1416,12 +1416,12 @@ def flash_attn_with_blocked_kvcache(
 
 
 def get_mla_metadata(
-    cache_seqlens: List[int],
+    cache_seqlens: torch.Tensor,
     total_num_heads: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     params:
-        cache_seqlens: [batch_size]
+        cache_seqlens (CPU Tensor): [batch_size]
         total_num_heads: num_heads // tp_size * (1 + next_n)
     return:
         tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (total_num_heads // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
