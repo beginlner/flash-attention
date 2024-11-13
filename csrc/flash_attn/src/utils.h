@@ -164,20 +164,38 @@ __forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB,
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename TA, typename LayoutA, typename TB, typename LayoutB,
-        typename TC, typename LayoutC, typename TiledMma>
-__forceinline__ __device__ void gemm(TiledMma &tiled_mma,
-                                     const Tensor<TA, LayoutA> &tCrA,
-                                     const Tensor<TB, LayoutB> &tCrB,
-                                     Tensor<TC, LayoutC> &tCrC) {
+template <bool zero_init=false, int wg_wait=0, bool arrive=true, bool commit=true, typename Tensor0, typename Tensor1, typename Tensor2, typename TiledMma>
+__forceinline__ __device__ void gemm(TiledMma &tiled_mma, Tensor0 const &tCrA, Tensor1 const &tCrB, Tensor2 &tCrC) {
+    constexpr bool Is_RS = !cute::is_base_of<cute::GMMA::DescriptorIterator, typename TiledMma::FrgTypeA>::value;
+    // Need to cast away const on tCrA since warpgroup_fence_operand doesn't take const
+    if constexpr (Is_RS) { warpgroup_fence_operand(const_cast<Tensor0 &>(tCrA)); }
     warpgroup_fence_operand(tCrC);
-    warpgroup_arrive();
-
-    cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
-
-    warpgroup_commit_batch();
-    warpgroup_wait<0>();
+    if constexpr (arrive) {
+        warpgroup_arrive();
+    }
+    if constexpr (zero_init) {
+        tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
+        // Unroll the K mode manually to set scale D to 1
+        CUTLASS_PRAGMA_UNROLL
+        for (int k_block = 0; k_block < size<2>(tCrA); ++k_block) {
+            cute::gemm(tiled_mma, tCrA(_,_,k_block), tCrB(_,_,k_block), tCrC);
+            tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+        }
+    } else {
+        // cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
+        // Unroll the K mode manually to set scale D to 1
+        CUTLASS_PRAGMA_UNROLL
+        for (int k_block = 0; k_block < size<2>(tCrA); ++k_block) {
+            cute::gemm(tiled_mma, tCrA(_,_,k_block), tCrB(_,_,k_block), tCrC);
+            tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+        }
+    }
+    if constexpr (commit) {
+        warpgroup_commit_batch();
+    }
+    if constexpr (wg_wait >= 0) { warpgroup_wait<wg_wait>(); }
     warpgroup_fence_operand(tCrC);
+    if constexpr (Is_RS) { warpgroup_fence_operand(const_cast<Tensor0 &>(tCrA)); }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

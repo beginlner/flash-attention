@@ -4,11 +4,12 @@ import triton
 import torch
 from flash_attn.flash_attn_interface import get_kvcache_block_size, flash_attn_with_blocked_kvcache
 
-b, s, h_q, h_kv, d = 256, 2048, 128, 1, 576
+b, s, h_q, h_kv, d = 66, 2048, 128, 1, 576
 v_dim = 512
-k0_bits, k1_bits = 4, 16
-k0_dtype, k1_dtype = "int4", "bfloat16"
-split_length = 384
+s_q = 1
+k0_bits, k1_bits = 8, 16
+k0_dtype, k1_dtype = "int8", "bfloat16"
+split_length = 512
 assert (split_length * k0_bits + (d - split_length) * k1_bits) % 32 == 0
 compressed_head_size = (split_length * k0_bits + (d - split_length) * k1_bits) // 32
 block_size = get_kvcache_block_size(d)
@@ -23,12 +24,14 @@ random.seed(0)
 
 cache_seqlens = torch.full((b,), s, dtype=torch.int32)
 for i in range(b):
-    cache_seqlens[i] = min(max(random.normalvariate(1100, 500), 1), 2048)
+    cache_seqlens[i] = min(max(random.normalvariate(1000, 1000), s_q), 20480)
+cache_seqlens[0] = 65536
 cache_seqlens = torch.sort(cache_seqlens, descending=True).values
 total_seqlens = cache_seqlens.sum().item()
+mean_seqlens = cache_seqlens.float().mean().int().item()
 max_seqlen = cache_seqlens.max().item()
 max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
-print("max:", max_seqlen, "sum:", total_seqlens, cache_seqlens.tolist())
+print("max:", max_seqlen, "sum:", total_seqlens, "mean:", mean_seqlens)
 
 
 def timer(func, name=""):
@@ -36,7 +39,7 @@ def timer(func, name=""):
     FLOPS = total_seqlens * h_q * (d + v_dim) * 2
     bytes = total_seqlens * h_kv * d * (torch.finfo(dtype).bits // 8)
 
-    print(f"{t} ms, {FLOPS / 10 ** 9 / t} tflops, {bytes / 10 ** 6 / t} GB/s")
+    print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} tflops, {bytes / 10 ** 6 / t:.0f} GB/s")
     return t
 
 
@@ -66,7 +69,6 @@ def create_k():
 def test_flash_attention():
     print(b, s, h_q, h_kv, d, v_dim, split_length)
 
-    s_q = 1
     q = torch.randn(b, s_q, h_q, d)
     compressed_k, k = create_k()
     compressed_blocked_k = compressed_k.view(-1, block_size, h_kv, compressed_head_size)

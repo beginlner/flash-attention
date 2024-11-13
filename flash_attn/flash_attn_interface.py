@@ -1,6 +1,6 @@
 # Copyright (c) 2023, Tri Dao.
 
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -1410,6 +1410,56 @@ def flash_attn_with_blocked_kvcache(
         window_size[0],
         window_size[1],
         rotary_interleaved,
+        num_splits,
+    )
+    return out if not return_softmax_lse else (out, softmax_lse)
+
+
+def get_mla_metadata(
+    cache_seqlens: torch.Tensor,
+    total_num_heads: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    params:
+        cache_seqlens (CPU Tensor): [batch_size]
+        total_num_heads: num_heads // tp_size * (1 + next_n)
+    return:
+        tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (total_num_heads // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
+        num_splits (CPU Tensor): [batch_size + 1]
+    """
+    return flash_attn_cuda.get_mla_metadata(cache_seqlens, total_num_heads)
+
+
+def flash_attn_with_blocked_kvcache_mla(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    head_size_v: int,
+    tile_scheduler_metadata: torch.Tensor,
+    num_splits: torch.Tensor,
+    kvcache_quantization_dtypes: Optional[Tuple[str, str]] = None,
+    kvcache_quantization_split_length: int = 0,
+    out: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    return_softmax_lse: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    kvcache_quantization_type = convert_kvcache_quantization_type(kvcache_quantization_dtypes)
+    out, softmax_lse = flash_attn_cuda.fwd_kvcache_mla(
+        q,
+        k_cache,
+        head_size_v,
+        kvcache_quantization_type,
+        kvcache_quantization_split_length,
+        cache_seqlens,
+        block_table,
+        out,
+        softmax_scale,
+        causal,
+        tile_scheduler_metadata,
         num_splits,
     )
     return out if not return_softmax_lse else (out, softmax_lse)

@@ -12,6 +12,7 @@
 #include <cute/numeric/int.hpp>
 
 #include "flash.h"
+#include "flash_mla.h"
 #include "static_switch.h"
 
 #ifndef TORCH_EXTENSION_NAME
@@ -1586,6 +1587,232 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     return {out, softmax_lse};
 }
 
+// This should match the logic in the MLA kernel.
+std::vector<at::Tensor>
+get_mla_metadata(
+        const at::Tensor &seqlens_k,
+        const int total_num_heads
+) {
+    static constexpr int block_size_m = 64, block_size_n = 64;
+    static constexpr int fixed_overhead_num_blocks = 5;
+
+    TORCH_CHECK(seqlens_k.is_cpu());
+    TORCH_CHECK(seqlens_k.is_contiguous());
+    TORCH_CHECK(seqlens_k.dtype() == torch::kInt32);
+    int batch_size = seqlens_k.size(0);
+    int *seqlens_k_ptr = seqlens_k.data_ptr<int>();
+    auto options = seqlens_k.options();
+
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    int sm_count = dprops->multiProcessorCount;
+    int num_sm_parts = sm_count / cutlass::ceil_div(total_num_heads, block_size_m);
+
+    auto tile_scheduler_metadata = torch::empty({num_sm_parts, TileSchedulerMetaDataSize}, options);
+    auto num_splits = torch::empty({batch_size + 1}, options);
+    int *tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
+    int *num_splits_ptr = num_splits.data_ptr<int>();
+
+    std::vector<int> num_blocks;
+    num_blocks.resize(batch_size);
+    int total_num_blocks = 0;
+    for (int i = 0; i < batch_size; ++i) {
+        int num_block = cutlass::ceil_div(seqlens_k_ptr[i], block_size_n);
+        num_blocks[i] = num_block;
+        total_num_blocks += num_block + fixed_overhead_num_blocks;
+    }
+    int payload = cutlass::ceil_div(total_num_blocks, num_sm_parts) + fixed_overhead_num_blocks;
+
+    int now_idx = 0, now_block = 0, now_n_split_idx = 0;
+    num_splits_ptr[0] = 0;
+    for (int i = 0; i < num_sm_parts; ++i) {
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 0] = now_idx;
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 1] = now_block * block_size_n;
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 4] = now_n_split_idx;
+        int remain_payload = payload;
+        while (now_idx < batch_size) {
+            int now_remain_blocks = num_blocks[now_idx] - now_block;
+            if (remain_payload >= now_remain_blocks + fixed_overhead_num_blocks) {
+                num_splits_ptr[now_idx + 1] = num_splits_ptr[now_idx] + (now_n_split_idx + 1);
+                remain_payload -= now_remain_blocks + fixed_overhead_num_blocks;
+                ++now_idx;
+                now_block = 0;
+                now_n_split_idx = 0;
+            } else {
+                if (remain_payload - fixed_overhead_num_blocks > 0) {
+                    now_block += remain_payload - fixed_overhead_num_blocks;
+                    ++now_n_split_idx;
+                    remain_payload = 0;
+                }
+                break;
+            }
+        }
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 2] = now_block > 0 ? now_idx : now_idx - 1;
+        tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 3] = now_block > 0 ? now_block * block_size_n : seqlens_k_ptr[now_idx - 1];
+    }
+    TORCH_CHECK(now_idx == batch_size && now_block == 0 && now_n_split_idx == 0);
+
+    return {tile_scheduler_metadata, num_splits};
+}
+
+std::vector<at::Tensor>
+mha_fwd_kvcache_mla(
+        at::Tensor &q,                               // batch_size x seqlen_q x num_heads x head_size
+        const at::Tensor &kcache,                    // num_blocks x page_block_size x num_heads_k x head_size
+        const int head_size_v,
+        const int kvcache_quantization_type,         // 0 for no quantization; 1 for int4 + int8
+        const int kvcache_quantization_split_length,
+        const at::Tensor &seqlens_k,                 // batch_size
+        const at::Tensor &block_table,               // batch_size x max_num_blocks_per_seq
+        c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size_v
+        const float softmax_scale,
+        bool is_causal,
+        const at::Tensor &tile_scheduler_metadata,   // num_sm_parts x TileSchedulerMetaDataSize
+        const at::Tensor &num_splits                 // batch_size + 1
+) {
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+    TORCH_CHECK(is_sm90);
+
+    auto q_dtype = q.dtype();
+    TORCH_CHECK(q_dtype == torch::kBFloat16);
+    if (kvcache_quantization_type == 0) {
+        TORCH_CHECK(kcache.dtype() == q_dtype, "query and key must have the same dtype");
+        TORCH_CHECK(kvcache_quantization_split_length == 0);
+    }
+
+    CHECK_DEVICE(q); CHECK_DEVICE(kcache);
+
+    TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(kcache.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+
+    CHECK_DEVICE(block_table);
+    TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
+    TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
+
+    const auto sizes = q.sizes();
+    const int batch_size = sizes[0];
+    const int seqlen_q_ori = sizes[1];
+    const int num_heads_ori = sizes[2];
+    const int head_size = sizes[3];
+    TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
+    TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
+    TORCH_CHECK(head_size == 576 && head_size_v == 512);
+
+    const int max_num_blocks_per_seq = block_table.size(1);
+    const int num_blocks = kcache.size(0);
+    const int page_block_size = kcache.size(1);
+    const int num_heads_k = kcache.size(2);
+    TORCH_CHECK(batch_size > 0, "batch size must be postive");
+    TORCH_CHECK(num_heads_ori % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
+
+    if (seqlen_q_ori == 1) { is_causal = false; }
+
+    const int ngroups = num_heads_ori / num_heads_k;
+    const int seqlen_q = seqlen_q_ori * ngroups;
+    const int num_heads = num_heads_k;
+    q = q.view({batch_size, seqlen_q_ori, num_heads_k, ngroups, head_size}).transpose(1, 2)
+            .reshape({batch_size, seqlen_q, num_heads, head_size});
+
+    int head_size_k = head_size;
+    if (kvcache_quantization_type > 0) {
+        TORCH_CHECK(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
+        TORCH_CHECK(kcache.dtype() == torch::kInt32, "kcache must have dtype torch.int32 in quantization.");
+        KVCACHE_QUANTIZATION_TYPE_SWITCH(kvcache_quantization_type, [&] {
+            head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
+                           (head_size - kvcache_quantization_split_length) * cute::sizeof_bits<quant_type1>::value) / 32;
+        });
+    }
+
+    CHECK_SHAPE(q, batch_size, seqlen_q, num_heads, head_size);
+    CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size_k);
+    CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
+
+    at::Tensor out;
+    if (out_.has_value()) {
+        out = out_.value();
+        TORCH_CHECK(out.dtype() == q_dtype, "Output must have the same dtype as inputs");
+        CHECK_DEVICE(out);
+        TORCH_CHECK(out.stride(-1) == 1, "Output tensor must have contiguous last dimension");
+        CHECK_SHAPE(out, batch_size, sizes[1], sizes[2], head_size_v);
+        out = out.view({batch_size, seqlen_q_ori, num_heads_k, ngroups, head_size_v}).transpose(1, 2)
+                .view({batch_size, seqlen_q, num_heads, head_size_v});
+    } else {
+        out = torch::empty({batch_size, seqlen_q, num_heads, head_size_v}, q.options());
+    }
+
+    TORCH_CHECK(seqlens_k.dtype() == torch::kInt32, "seqlens_k must have dtype int32");
+    CHECK_DEVICE(seqlens_k);
+    CHECK_CONTIGUOUS(seqlens_k);
+    CHECK_SHAPE(seqlens_k, batch_size);
+
+    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
+
+    auto opts = q.options();
+    auto softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
+
+    Flash_fwd_mla_params params = {};
+    // Set the sizes.
+    params.b = batch_size;
+    params.seqlen_q = seqlen_q;
+    params.cu_seqlens_k = seqlens_k.data_ptr<int>();
+    params.h = num_heads;
+    params.h_h_k_ratio = num_heads / num_heads_k;
+    params.ngroups = ngroups;
+    params.is_causal = is_causal;
+    params.d = head_size;
+    params.d_v = head_size_v;
+    params.scale_softmax = softmax_scale;
+    params.scale_softmax_log2 = float(softmax_scale * M_LOG2E);
+    // Set the pointers and strides.
+    params.q_ptr = q.data_ptr();
+    params.k_ptr = kcache.data_ptr();
+    params.o_ptr = out.data_ptr();
+    params.softmax_lse_ptr = softmax_lse.data_ptr();
+    // All stride are in elements, not bytes.
+    params.q_batch_stride = q.stride(0);
+    params.k_batch_stride = kcache.stride(0);
+    params.o_batch_stride = out.stride(0);
+    params.q_row_stride = q.stride(-3);
+    params.k_row_stride = kcache.stride(-3);
+    params.o_row_stride = out.stride(-3);
+    params.q_head_stride = q.stride(-2);
+    params.k_head_stride = kcache.stride(-2);
+    params.o_head_stride = out.stride(-2);
+
+    params.block_table = block_table.data_ptr<int>();
+    params.block_table_batch_stride = block_table.stride(0);
+    params.page_block_size = page_block_size;
+
+    TORCH_CHECK(tile_scheduler_metadata.dtype() == torch::kInt32, "tile_scheduler_metadata must have dtype int32");
+    TORCH_CHECK(tile_scheduler_metadata.size(1) == TileSchedulerMetaDataSize);
+    CHECK_DEVICE(tile_scheduler_metadata);
+    CHECK_CONTIGUOUS(tile_scheduler_metadata);
+    params.tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
+    params.num_sm_parts = tile_scheduler_metadata.size(0);
+    TORCH_CHECK(num_splits.dtype() == torch::kInt32, "num_splits must have dtype int32");
+    CHECK_DEVICE(num_splits);
+    CHECK_CONTIGUOUS(num_splits);
+    params.num_splits_ptr = num_splits.data_ptr<int>();
+
+    at::Tensor softmax_lse_accum = torch::empty({batch_size + params.num_sm_parts, num_heads, seqlen_q}, opts.dtype(at::kFloat));
+    at::Tensor out_accum = torch::empty({batch_size + params.num_sm_parts, num_heads, seqlen_q, head_size_v}, opts.dtype(at::kFloat));
+    params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
+    params.oaccum_ptr = out_accum.data_ptr();
+
+    params.kvcache_quantization_type = kvcache_quantization_type;
+    params.kvcache_quantization_split_length = kvcache_quantization_split_length;
+
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    run_mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576>(params, stream);
+
+    out = out.view({batch_size, seqlen_q_ori, ngroups, num_heads_k, head_size_v}).transpose(2, 3)
+            .reshape({batch_size, seqlen_q_ori, num_heads_ori, head_size_v});
+    softmax_lse = softmax_lse.view({batch_size, num_heads_k, seqlen_q_ori, ngroups}).transpose(2, 3)
+            .reshape({batch_size, num_heads_ori, seqlen_q_ori});
+
+    return {out, softmax_lse};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "FlashAttention";
     m.def("fwd", &mha_fwd, "Forward pass");
@@ -1593,4 +1820,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("varlen_bwd", &mha_varlen_bwd, "Backward pass (variable length)");
     m.def("fwd_kvcache", &mha_fwd_kvcache, "Forward pass, with KV-cache");
+    m.def("get_mla_metadata", &get_mla_metadata);
+    m.def("fwd_kvcache_mla", &mha_fwd_kvcache_mla, "MLA inference, with KV-cache");
 }
