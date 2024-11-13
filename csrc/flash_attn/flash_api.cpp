@@ -697,7 +697,17 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 
     auto opts = q.options();
 
-    auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+    at::Tensor softmax_lse;
+    bool unpadded_lse;
+    // TODO: Both use unpadded layout
+    if (paged_KV || seqlenq_ngroups_swapped) {
+        // SplitKV kernel needs padded LSE
+        softmax_lse = torch::empty({batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
+        unpadded_lse = false;
+    } else {
+        softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+        unpadded_lse = true;
+    }
     at::Tensor p;
     // Only return softmax if there's dropout to reduce compilation time
     if (return_softmax) {
@@ -729,7 +739,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      window_size_left,
                      window_size_right,
                      seqlenq_ngroups_swapped,
-                     true);
+                     unpadded_lse);
     params.total_q = total_q;
     params.d_v = head_size_v;
 
@@ -795,7 +805,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         int64_t out_size_after[] = {batch_size, num_heads_k * max_seqlen_q, head_size_v};
         out = out.reshape(out_size_before).transpose(1, 2).reshape(out_size_after);
         q_padded = q_padded.reshape(size_before).transpose(1, 2).reshape(size_after);
-        softmax_lse = softmax_lse.reshape({num_heads_k * max_seqlen_q, batch_size});
+        softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * max_seqlen_q, 1});
     }
 
     return {out, q_padded, k_padded, v_padded, out, softmax_lse, p, rng_state};
