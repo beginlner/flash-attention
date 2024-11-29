@@ -462,7 +462,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     const int n_block_min = !Is_local
         ? n_split_idx * n_blocks_per_split
         : std::max(n_split_idx * n_blocks_per_split, (m_block * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q - params.window_size_left) / kBlockN);
-    int n_block_max = std::min(cute::ceil_div(binfo.actual_seqlen_k, kBlockN), (n_split_idx + 1) * n_blocks_per_split);
+    int n_block_max = cute::ceil_div(binfo.actual_seqlen_k, kBlockN);
+    if (params.num_splits > 1) { n_block_max = min(n_block_max, (n_split_idx + 1) * n_blocks_per_split); }
     if (Is_causal || Is_local) {
         n_block_max = std::min(n_block_max,
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
@@ -593,7 +594,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv(const Params &par
     Tensor sScale_o = make_tensor(recast_ptr<float>(sP.data() + size(sP)), typename Kernel_traits::SmemLayoutRow{});
     Tensor tScale_osScale_o = sScale_o(_, tidx % kNThreadsS);
 
-    if (block_table != nullptr) {
+    if (block_table != nullptr && params.num_splits > 0) {  // mha_varlen_fwd maybe have one large partition size, which is larger than PARTITION_SIZE.
         int *block_table_shared = !QKCooperative ?
             reinterpret_cast<int *>(sScale_o.data().get().get() + size(sScale_o)) :
             reinterpret_cast<int *>(sP.data().get().get());
@@ -1246,7 +1247,7 @@ __forceinline__ __device__ void compute_attn_splitkv(const Params &params) {
     const int n_split_idx = blockIdx.y;
     const int num_n_splits = gridDim.y;
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
-    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE;
+    const bool NoSplit = binfo.actual_seqlen_k <= PARTITION_SIZE || params.num_splits == 0;  // params.num_splits can be 0 in mha_varlen_fwd
     if (Split == NoSplit) return;
     if constexpr (sizeof_bits_v<typename Kernel_traits::Element> == 8)
         flash::compute_attn_1rowblock_splitkv_fp8<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Split, Append_KV>(params, bidb, bidh, m_block, n_split_idx, num_n_splits);
