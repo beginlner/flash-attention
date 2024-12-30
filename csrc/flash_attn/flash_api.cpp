@@ -1597,7 +1597,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 std::vector<at::Tensor>
 get_mla_metadata(
         const at::Tensor &seqlens_k,
-        const int total_num_heads
+        const int num_heads_per_head_k,
+        const int num_heads_k
 ) {
     static constexpr int block_size_m = 64, block_size_n = 64;
     static constexpr int fixed_overhead_num_blocks = 5;
@@ -1611,7 +1612,7 @@ get_mla_metadata(
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
     int sm_count = dprops->multiProcessorCount;
-    int num_sm_parts = sm_count / cutlass::ceil_div(total_num_heads, block_size_m);
+    int num_sm_parts = sm_count / num_heads_k / cutlass::ceil_div(num_heads_per_head_k, block_size_m);
 
     auto tile_scheduler_metadata = torch::empty({num_sm_parts, TileSchedulerMetaDataSize}, options);
     auto num_splits = torch::empty({batch_size + 1}, options);
@@ -1716,7 +1717,7 @@ mha_fwd_kvcache_mla(
     const int ngroups = num_heads_ori / num_heads_k;
     const int seqlen_q = seqlen_q_ori * ngroups;
     const int num_heads = num_heads_k;
-    q = q.view({batch_size, seqlen_q_ori, num_heads_k, ngroups, head_size}).transpose(1, 2)
+    q = q.view({batch_size, seqlen_q_ori, num_heads_k, ngroups, head_size}).transpose(2, 3)
             .reshape({batch_size, seqlen_q, num_heads, head_size});
 
     int head_size_k = head_size;

@@ -4,8 +4,8 @@ import torch
 import random
 from flash_attn.flash_attn_interface import *
 
-b, s, h_q, h_kv = 66, 2048, 64, 1
-s_q = 2
+b, s, h_q, h_kv = 64, 4096, 64, 1
+s_q = 3
 causal = True
 dtype = torch.bfloat16
 device = torch.device("cuda:5")
@@ -24,6 +24,8 @@ total_seqlens = cache_seqlens.sum().item()
 mean_seqlens = cache_seqlens.float().mean().int().item()
 max_seqlen = cache_seqlens.max().item()
 max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
+cu_seqlens_q = torch.arange(0, (b + 1) * s_q, step=s_q, dtype=torch.int32)
+cu_seqlens_k = torch.cumsum(torch.nn.functional.pad(cache_seqlens, (1, 0)), 0).int()
 print("max:", max_seqlen, "sum:", total_seqlens, "mean:", mean_seqlens)
 
 
@@ -85,7 +87,7 @@ def test_flash_attention(d, v_dim):
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     blocked_v = blocked_k[..., :v_dim]
     try:
-        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.cpu(), s_q * h_q)
+        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.cpu(), (h_q // h_kv) * s_q, h_kv)
         tile_scheduler_metadata = tile_scheduler_metadata.cuda()
         num_splits = num_splits.cuda()
         # print(tile_scheduler_metadata)

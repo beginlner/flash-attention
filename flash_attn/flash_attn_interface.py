@@ -1417,17 +1417,19 @@ def flash_attn_with_blocked_kvcache(
 
 def get_mla_metadata(
     cache_seqlens: torch.Tensor,
-    total_num_heads: int,
+    num_heads_per_head_k: int,
+    num_heads_k: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     params:
         cache_seqlens (CPU Tensor): [batch_size]
-        total_num_heads: num_heads // tp_size * (1 + next_n)
+        num_heads_per_head_k: num_heads // max(num_heads_k, tp_size) * (1 + next_n)
+        num_heads_k
     return:
-        tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (total_num_heads // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
+        tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (num_heads_per_head_k // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
         num_splits (CPU Tensor): [batch_size + 1]
     """
-    return flash_attn_cuda.get_mla_metadata(cache_seqlens, total_num_heads)
+    return flash_attn_cuda.get_mla_metadata(cache_seqlens, num_heads_per_head_k, num_heads_k)
 
 
 def flash_attn_with_blocked_kvcache_mla(
