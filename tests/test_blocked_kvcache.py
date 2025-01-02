@@ -87,7 +87,7 @@ def test_flash_attention(d, v_dim):
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     blocked_v = blocked_k[..., :v_dim]
     try:
-        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.cpu(), (h_q // h_kv) * s_q, h_kv)
+        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.cpu(), (h_q // h_kv) * s_q, h_kv, block_size)
         tile_scheduler_metadata = tile_scheduler_metadata.cuda()
         num_splits = num_splits.cuda()
         # print(tile_scheduler_metadata)

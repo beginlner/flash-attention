@@ -1598,9 +1598,10 @@ std::vector<at::Tensor>
 get_mla_metadata(
         const at::Tensor &seqlens_k,
         const int num_heads_per_head_k,
-        const int num_heads_k
+        const int num_heads_k,
+        const int block_size_n
 ) {
-    static constexpr int block_size_m = 64, block_size_n = 64;
+    static constexpr int block_size_m = 64;
     static constexpr int fixed_overhead_num_blocks = 5;
 
     TORCH_CHECK(seqlens_k.is_cpu());
