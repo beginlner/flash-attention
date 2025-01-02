@@ -270,7 +270,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                                                                    const int n_split_idx, const int seqlen_k,
                                                                    const int n_block_min, const int n_block_max, const bool NoSplit,
                                                                    SharedStorage &shared_storage) {
-    static_assert(Kernel_traits::Share_KV);
+    static_assert(Kernel_traits::Shared_KV);
     static_assert(Kernel_traits::Blocked_KV);
     static_assert(!Kernel_traits::QKCooperative);
     static_assert(std::is_same_v<typename Kernel_traits::KV_type1, typename Kernel_traits::Element>);
