@@ -35,13 +35,14 @@ template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayout
 
 template<int kHeadDim_, int kBlockM_, int kBlockN_, typename elem_type=cutlass::bfloat16_t,
         int kHeadDimV_=0,
+        bool Shared_KV_=true,
         int SplitLength_=0, typename KV_type0_=cutlass::bfloat16_t, typename KV_type1_=cutlass::bfloat16_t>
 struct Flash_fwd_kernel_traits_mla {
     using Element = elem_type;
     using ElementAccum = float;
     using index_t = int64_t;
 
-    static constexpr bool Share_KV = true;
+    static constexpr bool Shared_KV = Shared_KV_;
     static constexpr bool Blocked_KV = true;
 
     static constexpr int kNWarps = 8;
@@ -56,6 +57,7 @@ struct Flash_fwd_kernel_traits_mla {
     static_assert(kHeadDim % 32 == 0);
     static constexpr int kHeadDimV = kHeadDimV_ != 0 ? kHeadDimV_ : kHeadDim;
     static_assert(kHeadDimV % 32 == 0);
+    static_assert(kHeadDimV <= kHeadDim);
     static constexpr int kBlockKSmem = (kHeadDim % 64 == 0 && SplitLength_ % 64 == 0) ? 64 : 32;
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
 
@@ -667,13 +669,15 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
     }
     __syncthreads();
 
+    static_assert(kHeadDimV % kNThreads == 0);
+    constexpr int Elements = kHeadDimV / kNThreads;
     const index_t row_offset_oaccum = (split_offset * hs + hs_idx) * kHeadDimV;
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
                                  Shape<Int<kHeadDimV>>{}, Stride<_1>{});
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
             Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
             Layout<Shape<Int<kNThreads>>>{},
-            Layout<Shape<_4>>{}));
+            Layout<Shape<Int<Elements>>>{}));
     GmemTiledCopyOaccum gmem_tiled_copy_Oaccum;
     auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_S(gOaccum);
@@ -694,7 +698,7 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
     const int head_idx = (bidx - batch_idx * hs) / params.seqlen_q;
     const int row = bidx - batch_idx * hs - head_idx * params.seqlen_q;
     auto o_ptr = reinterpret_cast<Element *>(params.o_ptr) + batch_idx * params.o_batch_stride + head_idx * params.o_head_stride + row * params.o_row_stride;
-    Tensor gO = make_tensor(make_gmem_ptr(o_ptr + tidx * 4), Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
+    Tensor gO = make_tensor(make_gmem_ptr(o_ptr + tidx * Elements), Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
     cute::copy(rO, gO);
 }
 
@@ -728,11 +732,11 @@ void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream) 
     static_assert(Headdim == 576);
     FLASH_ASSERT(params.d_v == 512);
     if (params.kvcache_quantization_type == 0) {
-        run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512>>(params, stream);
+        run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512, true>>(params, stream);
     } else {
         KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
             KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
-                run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512, SplitLength, quant_type0, quant_type1>>(params, stream);
+                run_flash_splitkv_fwd_mla<Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512, true, SplitLength, quant_type0, quant_type1>>(params, stream);
             });
         });
     }
