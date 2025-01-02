@@ -1666,6 +1666,7 @@ std::vector<at::Tensor>
 mha_fwd_kvcache_mla(
         at::Tensor &q,                               // batch_size x seqlen_q x num_heads x head_size
         const at::Tensor &kcache,                    // num_blocks x page_block_size x num_heads_k x head_size
+        c10::optional<const at::Tensor> &vcache_,    // num_blocks x page_block_size x num_heads_k x head_size_v
         const int head_size_v,
         const int kvcache_quantization_type,         // 0 for no quantization; 1 for int4 + int8
         const int kvcache_quantization_split_length,
@@ -1681,6 +1682,8 @@ mha_fwd_kvcache_mla(
     bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
     TORCH_CHECK(is_sm90);
 
+    at::Tensor vcache = vcache_.has_value() ? vcache_.value() : kcache;
+
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kBFloat16);
     if (kvcache_quantization_type == 0) {
@@ -1688,10 +1691,11 @@ mha_fwd_kvcache_mla(
         TORCH_CHECK(kvcache_quantization_split_length == 0);
     }
 
-    CHECK_DEVICE(q); CHECK_DEVICE(kcache);
+    CHECK_DEVICE(q); CHECK_DEVICE(kcache); CHECK_DEVICE(vcache);
 
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(kcache.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(vcache.stride(-1) == 1, "Input tensor must have contiguous last dimension");
 
     CHECK_DEVICE(block_table);
     TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
@@ -1704,7 +1708,6 @@ mha_fwd_kvcache_mla(
     const int head_size = sizes[3];
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
     TORCH_CHECK(head_size_v % 32 == 0, "head_size_v should be a multiple of 32");
-    TORCH_CHECK(head_size == 576 && head_size_v == 512);
 
     const int max_num_blocks_per_seq = block_table.size(1);
     const int num_blocks = kcache.size(0);
@@ -1729,10 +1732,12 @@ mha_fwd_kvcache_mla(
             head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
                            (head_size - kvcache_quantization_split_length) * cute::sizeof_bits<quant_type1>::value) / 32;
         });
+        TORCH_CHECK(!vcache_.has_value(), "Only support shared KV in quantization.");
     }
 
     CHECK_SHAPE(q, batch_size, seqlen_q, num_heads, head_size);
     CHECK_SHAPE(kcache, num_blocks, page_block_size, num_heads_k, head_size_k);
+    if (vcache_.has_value()) { CHECK_SHAPE(vcache, num_blocks, page_block_size, num_heads_k, head_size_v); }
     CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
 
     at::Tensor out;
@@ -1774,17 +1779,21 @@ mha_fwd_kvcache_mla(
     // Set the pointers and strides.
     params.q_ptr = q.data_ptr();
     params.k_ptr = kcache.data_ptr();
+    params.v_ptr = vcache.data_ptr();
     params.o_ptr = out.data_ptr();
     params.softmax_lse_ptr = softmax_lse.data_ptr();
     // All stride are in elements, not bytes.
     params.q_batch_stride = q.stride(0);
     params.k_batch_stride = kcache.stride(0);
+    params.v_batch_stride = vcache.stride(0);
     params.o_batch_stride = out.stride(0);
     params.q_row_stride = q.stride(-3);
     params.k_row_stride = kcache.stride(-3);
+    params.v_row_stride = vcache.stride(-3);
     params.o_row_stride = out.stride(-3);
     params.q_head_stride = q.stride(-2);
     params.k_head_stride = kcache.stride(-2);
+    params.v_head_stride = vcache.stride(-2);
     params.o_head_stride = out.stride(-2);
 
     params.block_table = block_table.data_ptr<int>();
@@ -1811,7 +1820,13 @@ mha_fwd_kvcache_mla(
     params.kvcache_quantization_split_length = kvcache_quantization_split_length;
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    run_mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576>(params, stream);
+    if (head_size == 576) {
+        run_mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576>(params, stream);
+    } else if (head_size == 128) {
+        run_mha_fwd_splitkv_mha_128<cutlass::bfloat16_t>(params, stream);
+    } else {
+        TORCH_CHECK(false, "head_size is not supported.");
+    }
 
     out = out.view({batch_size, seqlen_q_ori, ngroups, num_heads_k, head_size_v}).transpose(2, 3)
             .reshape({batch_size, seqlen_q_ori, num_heads_ori, head_size_v});

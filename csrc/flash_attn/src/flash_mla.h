@@ -13,17 +13,21 @@ struct Flash_fwd_mla_params {
 
     void *__restrict__ q_ptr;
     void *__restrict__ k_ptr;
+    void *__restrict__ v_ptr;
     void * __restrict__ o_ptr;
     void * __restrict__ softmax_lse_ptr;
 
     index_t q_batch_stride;
     index_t k_batch_stride;
+    index_t v_batch_stride;
     index_t o_batch_stride;
     index_t q_row_stride;
     index_t k_row_stride;
+    index_t v_row_stride;
     index_t o_row_stride;
     index_t q_head_stride;
     index_t k_head_stride;
+    index_t v_head_stride;
     index_t o_head_stride;
 
     int * __restrict__ block_table;
@@ -47,3 +51,5 @@ static constexpr int TileSchedulerMetaDataSize = 8;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, int Headdim> void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream);
+
+template<typename T> void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stream);

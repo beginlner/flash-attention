@@ -7,6 +7,7 @@ from flash_attn.flash_attn_interface import *
 b, s, h_q, h_kv = 64, 4096, 64, 1
 s_q = 3
 causal = True
+shared_kv = True
 dtype = torch.bfloat16
 device = torch.device("cuda:5")
 torch.set_default_dtype(dtype)
@@ -50,7 +51,7 @@ def assert_close(x, y, name=""):
 def timer(func, name=""):
     t = triton.testing.do_bench(func, fast_flush=False)
     FLOPS = s_q * total_seqlens * h_q * (d + v_dim) * 2
-    bytes = total_seqlens * h_kv * d * (torch.finfo(dtype).bits // 8)
+    bytes = total_seqlens * h_kv * (d + (v_dim if not shared_kv else 0)) * (torch.finfo(dtype).bits // 8)
 
     print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} tflops, {bytes / 10 ** 6 / t:.0f} GB/s")
     return t
@@ -85,7 +86,7 @@ def test_flash_attention(d, v_dim):
 
     block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
-    blocked_v = blocked_k[..., :v_dim]
+    blocked_v = torch.randn(block_table.numel(), block_size, h_kv, v_dim) if not shared_kv else blocked_k[..., :v_dim]
     try:
         tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.cpu(), (h_q // h_kv) * s_q, h_kv, block_size)
         tile_scheduler_metadata = tile_scheduler_metadata.cuda()
