@@ -387,9 +387,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         cute::copy(softmax.row_sum, tRow_sumsRow_sum);
         cutlass::arch::NamedBarrier::arrive(kNThreads, static_cast<int>(NamedBarriers::SoftmaxReady));
     } else {
-        assert(params.cache_batch_idx == nullptr);
         const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
         {
+            assert(n_block_max - n_block_min <= MaxNumPagesPerBlock);
             // Load block_table from global memory to shared memory
             int *block_table_shared = reinterpret_cast<int *>(shared_storage.smem_block_table.data());
             for (int i = tidx - kNThreadsS; i <= n_block_max - n_block_min - 1; i += kNThreads - kNThreadsS) {
