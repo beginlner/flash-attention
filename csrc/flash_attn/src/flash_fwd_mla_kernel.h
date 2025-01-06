@@ -177,7 +177,7 @@ struct SharedStorageMHA {
         struct {
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutQ>> smem_q;
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutK>> smem_k;
-            cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutK>> smem_v;
+            cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutV>> smem_v;
             cute::array_aligned<int, MaxNumPagesPerBlock> smem_block_table;
         };
         struct {
@@ -633,7 +633,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.smem_q.data()), typename Kernel_traits::SmemLayoutQ{});
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.smem_k.data()), typename Kernel_traits::SmemLayoutK{});
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.smem_v.data()), typename Kernel_traits::SmemLayoutV{});
-    Tensor sVt = make_tensor(make_smem_ptr(sV.data()), typename Kernel_traits::SmemLayoutVtransposed{});
+    Tensor sVt = make_tensor(make_smem_ptr(shared_storage.smem_v.data()), typename Kernel_traits::SmemLayoutVtransposed{});
     typename Kernel_traits::GmemTiledCopy gmem_tiled_copy_QKV;
     auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
     Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
@@ -671,7 +671,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     cute::cp_async_fence();
 
     auto LoadK = [&](int n_block) {
-        if (n_block < n_block_min) { return; }
         // Advance gK
         const index_t offset = (block_table[n_block] - block_table[n_block + 1]) * params.k_batch_stride;
         tKgK.data() = tKgK.data() + offset;
@@ -729,7 +728,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
         flash::cp_async_wait<0>();
         __syncthreads();
 
-        LoadK(n_block - 1);
+        if (n_block > n_block_min) { LoadK(n_block - 1); }
 
         const bool is_masking_step = masking_step > 0;
         if (is_masking_step) {
@@ -756,8 +755,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
                            softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2)
                                            : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*//*Is_local=*/false, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2);
 
-        Tensor rP = make_tensor<Element>(acc_s.layout());
-        cute::copy(flash::convert_type<Element>(acc_s), rP);
+        Tensor rP = flash::convert_type<Element>(acc_s);
 
         flash::rescale_o(acc_o, scale_o);
 
