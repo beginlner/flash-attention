@@ -20,7 +20,8 @@ using namespace cute;
 #include "flash_mla.h"
 
 
-template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayoutK() {
+template<typename PrecType, int DIM, int DIM2 = DIM>
+constexpr auto getSmemLayoutK() {
     constexpr int headSizeBytes = sizeof(PrecType) * DIM;
     constexpr int headSizeBytes2 = sizeof(PrecType) * DIM2;
 
@@ -34,9 +35,9 @@ template <typename PrecType, int DIM, int DIM2=DIM> constexpr auto getSmemLayout
 }
 
 template<int kHeadDim_, int kBlockM_, int kBlockN_, typename elem_type=cutlass::bfloat16_t,
-        int kHeadDimV_=0,
-        bool Shared_KV_=true,
-        int SplitLength_=0, typename KV_type0_=cutlass::bfloat16_t, typename KV_type1_=cutlass::bfloat16_t>
+        int kHeadDimV_ = 0,
+        bool Shared_KV_ = true,
+        int SplitLength_ = 0, typename KV_type0_=cutlass::bfloat16_t, typename KV_type1_=cutlass::bfloat16_t>
 struct Flash_fwd_kernel_traits_mla {
     using Element = elem_type;
     using ElementAccum = float;
@@ -153,7 +154,7 @@ using namespace cute;
 
 static constexpr int MaxNumPagesPerBlock = 256;
 
-template <typename Kernel_traits>
+template<typename Kernel_traits>
 struct SharedStorageMLA {
     union {
         struct {
@@ -171,7 +172,7 @@ struct SharedStorageMLA {
     };
 };
 
-template <typename Kernel_traits>
+template<typename Kernel_traits>
 struct SharedStorageMHA {
     union {
         struct {
@@ -317,7 +318,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
 
     typename Kernel_traits::TiledMmaO tiled_mma_o;
     auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
-    Tensor tOrVt  = thr_mma_o.partition_fragment_B(sVt);                // (MMA, MMA_K,MMA_N)
+    Tensor tOrVt = thr_mma_o.partition_fragment_B(sVt);                // (MMA, MMA_K,MMA_N)
     Tensor tOrO = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_o = make_tensor(tOrO.data(), flash::convert_gmma_to_mma_tensor(tOrO.layout()));  // (4, MMA_M, X)
     clear(acc_o);
@@ -328,8 +329,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
     if (warp_group_idx == 0) {
         typename Kernel_traits::TiledMma tiled_mma;
         auto thr_mma = tiled_mma.get_thread_slice(tidx);
-        Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
-        Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
+        Tensor tSrQ = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
+        Tensor tSrK = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
 
         if (n_block % 2 == 1) {
             // Double buffer for sK
@@ -358,7 +359,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
             if (is_masking_step) {
                 Tensor cS = make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{});
                 Tensor tScS = thr_mma.partition_C(cS);
-                #pragma unroll
+#pragma unroll
                 for (int i = 0; i < size(tSrS); ++i) {
                     if constexpr (!Is_causal) {  // Just masking based on col
                         if (int(get<1>(tScS(i))) >= int(seqlen_k - n_block * kBlockN)) tSrS(i) = -INFINITY;
@@ -473,7 +474,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         typename Kernel_traits::SmemTiledCopyK smem_tiled_copy_K;
         Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
         Tensor tKQuant1rKQuant1_high = make_tensor<Element>(tKQuant1rKQuant1.layout());
-        auto LDG_K = [&] (const int n) {
+        auto LDG_K = [&](const int n) {
 #pragma unroll
             for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
                 copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, n, k), tKQuant0rKQuant0(_, n, k));
@@ -482,13 +483,13 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                 copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
             }
         };
-        auto Cast_K = [&] (const int n) {
+        auto Cast_K = [&](const int n) {
 #pragma unroll
             for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
                 convert_type_out(tKQuant0rKQuant0(_, n, k), tKQuant0rKQuant0_high(_, n, k));
             }
         };
-        auto STS_K = [&] (const int n) {
+        auto STS_K = [&](const int n) {
 #pragma unroll
             for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
                 copy(smem_tiled_copy_K, tKQuant0rKQuant0_high(_, n, k), tKsK(_, n, k));
@@ -689,13 +690,13 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
 
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
-    Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
-    Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
+    Tensor tSrQ = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
+    Tensor tSrK = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
     Tensor tSrS = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_s = make_tensor(tSrS.data(), flash::convert_gmma_to_mma_tensor(tSrS.layout()));  // (4, MMA_M, X)
     typename Kernel_traits::TiledMmaO tiled_mma_o;
     auto thr_mma_o = tiled_mma_o.get_thread_slice(tidx);
-    Tensor tOrVt  = thr_mma_o.partition_fragment_B(sVt);                // (MMA, MMA_K,MMA_N)
+    Tensor tOrVt = thr_mma_o.partition_fragment_B(sVt);                // (MMA, MMA_K,MMA_N)
     Tensor tOrO = partition_fragment_C(tiled_mma_o, Shape<Int<kBlockM>, Int<kHeadDimV>>{});  // ((MMA=4, X), MMA_M, MMA_N=1)
     Tensor acc_o = make_tensor(tOrO.data(), flash::convert_gmma_to_mma_tensor(tOrO.layout()));  // (4, MMA_M, X)
     clear(acc_o);
@@ -708,7 +709,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     // If not even_N, then seqlen_k might end in the middle of a block. In that case we need to
     // mask 2 blocks (e.g. when kBlockM == kBlockN), not just 1.
     constexpr int n_masking_steps = !Is_causal ? 1 : cute::ceil_div(kBlockM, kBlockN) + 1;
-    #pragma unroll 1
+#pragma unroll 1
     for (int masking_step = n_masking_steps; n_block >= n_block_min; --masking_step, --n_block) {
         flash::cp_async_wait<0>();
         __syncthreads();
@@ -781,7 +782,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
     extern __shared__ char shared_memory[];
     auto &shared_storage = *reinterpret_cast<SharedStorage *>(shared_memory);
 
-    int* tile_scheduler_metadata_ptr = params.tile_scheduler_metadata_ptr + partition_idx * TileSchedulerMetaDataSize;
+    int *tile_scheduler_metadata_ptr = params.tile_scheduler_metadata_ptr + partition_idx * TileSchedulerMetaDataSize;
     int4 tile_scheduler_metadata = __ldg(reinterpret_cast<int4 *>(tile_scheduler_metadata_ptr));
     int begin_idx = tile_scheduler_metadata.x;
     int begin_seqlen = tile_scheduler_metadata.y;
@@ -790,7 +791,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
     if (begin_idx >= params.b) return;
     int begin_n_split_idx = __ldg(tile_scheduler_metadata_ptr + 4);
 
-    #pragma unroll 1
+#pragma unroll 1
     for (int batch_id = begin_idx; batch_id <= end_idx; ++batch_id) {
         const int n_split_idx = batch_id == begin_idx ? begin_n_split_idx : 0;
         const int seqlen_k = __ldg(params.cu_seqlens_k + batch_id);
