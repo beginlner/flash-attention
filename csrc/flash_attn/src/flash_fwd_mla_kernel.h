@@ -249,7 +249,7 @@ __forceinline__ __device__ void store(const Flash_fwd_mla_params &params, const 
 
     __syncthreads();
 
-    if (tidx >= kNThreadsS) {
+    if (kNThreadsS == 128 && tidx >= kNThreadsS) {
         return;
     }
 
@@ -619,12 +619,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
 
     const index_t row_offset_q = bidb * params.q_batch_stride + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
-    const index_t row_offset_k = block_table[n_block_max - 1] * params.k_batch_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
-    const index_t row_offset_v = block_table[n_block_max - 1] * params.v_batch_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
+    const index_t row_offset_k = block_table[n_block] * params.k_batch_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
+    const index_t row_offset_v = block_table[n_block] * params.v_batch_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
     Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
                             Shape<Int<kBlockM>, Int<kHeadDim>>{},
                             make_stride(params.q_row_stride, _1{}));
-    // We move K and V to the last block.
     Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
                             make_stride(params.k_row_stride, _1{}));
