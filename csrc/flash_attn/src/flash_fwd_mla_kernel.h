@@ -34,7 +34,7 @@ constexpr auto getSmemLayoutK() {
     }
 }
 
-template<int kHeadDim_, int kBlockM_, int kBlockN_, typename elem_type=cutlass::bfloat16_t,
+template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename elem_type=cutlass::bfloat16_t,
         int kHeadDimV_ = 0,
         bool Shared_KV_ = true,
         int SplitLength_ = 0, typename KV_type0_=cutlass::bfloat16_t, typename KV_type1_=cutlass::bfloat16_t>
@@ -46,9 +46,9 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr bool Shared_KV = Shared_KV_;
     static constexpr bool Blocked_KV = true;
 
-    static constexpr int kNWarps = 8;
+    static constexpr int kNWarps = kNWarps_;
     static constexpr int kNThreads = kNWarps * 32;
-    static constexpr int kNWarpsS = Shared_KV ? 4 : 8;
+    static constexpr int kNWarpsS = 4;
     static constexpr int kNThreadsS = kNWarpsS * 32;
 
     static constexpr int kBlockM = kBlockM_;
@@ -249,9 +249,7 @@ __forceinline__ __device__ void store(const Flash_fwd_mla_params &params, const 
 
     __syncthreads();
 
-    if (kNThreadsS == 128 && tidx >= kNThreadsS) {
-        return;
-    }
+    if (tidx >= kNThreadsS) { return; }
 
     Tensor tOrOaccum = make_tensor<ElementO>(shape(tOgOaccum));
     cute::copy(gmem_tiled_copy_Oaccum, tOsOaccum, tOrOaccum);
@@ -609,7 +607,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     constexpr int kHeadDimV = Kernel_traits::kHeadDimV;
     constexpr int kNThreads = Kernel_traits::kNThreads;
     constexpr int kNThreadsS = Kernel_traits::kNThreadsS;
-    static_assert(kNThreads == 256 and kNThreadsS == 256);
+    static_assert(kNThreads == 128 and kNThreadsS == 128);
     using Element = typename Kernel_traits::Element;
     using index_t = typename Kernel_traits::index_t;
 
@@ -771,7 +769,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
 }
 
 template<typename Kernel_traits, bool Is_causal, typename SharedStorage>
-__global__ void __launch_bounds__(256, 1, 1)
+__global__ void __launch_bounds__(Kernel_traits::kNThreads, 1, 1)
 flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
     constexpr int kBlockN = Kernel_traits::kBlockN;
     const int m_block = blockIdx.x;
@@ -927,12 +925,12 @@ void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream) 
     FLASH_ASSERT(params.d_v == 512);
     FLASH_ASSERT(params.k_ptr == params.v_ptr);  // Shared_KV
     if (params.kvcache_quantization_type == 0) {
-        using Kernel_traits = Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512, true>;
+        using Kernel_traits = Flash_fwd_kernel_traits_mla<576, 64, 64, 8, T, 512, true>;
         run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMLA<Kernel_traits>>(params, stream);
     } else {
         KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
             KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
-                using Kernel_traits = Flash_fwd_kernel_traits_mla<576, 64, 64, T, 512, true, SplitLength, quant_type0, quant_type1>;
+                using Kernel_traits = Flash_fwd_kernel_traits_mla<576, 64, 64, 8, T, 512, true, SplitLength, quant_type0, quant_type1>;
                 run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMLA<Kernel_traits>>(params, stream);
             });
         });
@@ -944,6 +942,6 @@ void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stre
     FLASH_ASSERT(params.d == 128);
     FLASH_ASSERT(params.d_v == 128);
     FLASH_ASSERT(params.kvcache_quantization_type == 0);
-    using Kernel_traits = Flash_fwd_kernel_traits_mla<128, 64, 128, T, 128, false>;
+    using Kernel_traits = Flash_fwd_kernel_traits_mla<128, 64, 128, 4, T, 128, false>;
     run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
 }
