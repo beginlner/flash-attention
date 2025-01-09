@@ -1424,11 +1424,11 @@ def get_mla_metadata(
     """
     params:
         cache_seqlens (CPU Tensor): [batch_size]
-        num_heads_per_head_k: num_heads // max(num_heads_k, tp_size) * (1 + next_n)
+        num_heads_per_head_k: total_num_heads // max(total_num_heads_k, tp_size) * (1 + next_n)
         num_heads_k
         block_size
     return:
-        tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // (num_heads_per_head_k // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
+        tile_scheduler_metadata (CPU Tensor): [num_sm_parts(=sm_count // num_heads_k // (num_heads_per_head_k // block_size_m(=64))), TileSchedulerMetaDataSize(=8)]
         num_splits (CPU Tensor): [batch_size + 1]
     """
     return flash_attn_cuda.get_mla_metadata(cache_seqlens, num_heads_per_head_k, num_heads_k, block_size)
