@@ -133,7 +133,7 @@ struct Flash_fwd_kernel_traits_mla {
     static constexpr int SplitLength = SplitLength_;
     static_assert(SplitLength % kBlockKSmem == 0);
     using KV_type0 = std::conditional_t<(SplitLength > 0), KV_type0_, Element>;
-    using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;;
+    using KV_type1 = std::conditional_t<(SplitLength > 0), KV_type1_, Element>;
     using GmemTiledCopyKQuant0 = decltype(make_tiled_copy(
             Copy_Atom<DefaultCopy, KV_type0>{},
             GmemLayoutAtom{},
@@ -513,6 +513,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                 for (int n = 0; n < size<1>(tKsK); ++n) {
                     LDG_K(n);
                 }
+#pragma unroll
+                for (int n = 0; n < size<1>(tKsK); ++n) {
+                    Cast_K(n);
+                    STS_K(n);
+                }
             }
             cute::cp_async_fence();
         };
@@ -550,17 +555,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
             LoadK(n_block);
 
             cutlass::arch::NamedBarrier::sync(kNThreads, static_cast<int>(NamedBarriers::SReady));
-
-            if (Kernel_traits::SplitLength > 0 && n_block > n_block_min) {
-#pragma unroll
-                for (int n = 0; n < size<1>(tKsK); ++n) {
-                    Cast_K(n);
-                }
-#pragma unroll
-                for (int n = 0; n < size<1>(tKsK); ++n) {
-                    STS_K(n);
-                }
-            }
 
             typename Kernel_traits::TiledMma tiled_mma;
             auto acc_s_layout = flash::convert_gmma_to_mma_tensor(partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{}).layout());
