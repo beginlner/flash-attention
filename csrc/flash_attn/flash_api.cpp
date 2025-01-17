@@ -9,7 +9,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cutlass/numeric_types.h>
-#include <cute/numeric/int.hpp>
+#include <cutlass/fast_math.h>
 
 #include "flash.h"
 #include "flash_mla.h"
@@ -1429,8 +1429,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         TORCH_CHECK(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
         TORCH_CHECK(kcache.dtype() == torch::kInt32, "kcache must have dtype torch.int32 in quantization.");
         KVCACHE_QUANTIZATION_TYPE_SWITCH(kvcache_quantization_type, [&] {
-            head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
-                    (head_size - kvcache_quantization_split_length) * cute::sizeof_bits<quant_type1>::value) / 32;
+            head_size_k = (kvcache_quantization_split_length * cutlass::sizeof_bits<quant_type0>::value +
+                    (head_size - kvcache_quantization_split_length) * cutlass::sizeof_bits<quant_type1>::value) / 32;
         });
         TORCH_CHECK(!vcache_.has_value(), "Only support shared KV in quantization.");
     }
@@ -1729,8 +1729,8 @@ mha_fwd_kvcache_mla(
         TORCH_CHECK(kvcache_quantization_split_length > 0 && kvcache_quantization_split_length <= head_size);
         TORCH_CHECK(kcache.dtype() == torch::kInt32, "kcache must have dtype torch.int32 in quantization.");
         KVCACHE_QUANTIZATION_TYPE_SWITCH(kvcache_quantization_type, [&] {
-            head_size_k = (kvcache_quantization_split_length * cute::sizeof_bits<quant_type0>::value +
-                           (head_size - kvcache_quantization_split_length) * cute::sizeof_bits<quant_type1>::value) / 32;
+            head_size_k = (kvcache_quantization_split_length * cutlass::sizeof_bits<quant_type0>::value +
+                           (head_size - kvcache_quantization_split_length) * cutlass::sizeof_bits<quant_type1>::value) / 32;
         });
         TORCH_CHECK(!vcache_.has_value(), "Only support shared KV in quantization.");
     }
