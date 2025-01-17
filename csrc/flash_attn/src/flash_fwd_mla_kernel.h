@@ -95,7 +95,7 @@ struct Flash_fwd_kernel_traits_mla {
             SmemLayoutAtomO{},
             Shape<Int<kBlockM>, Int<kHeadDimV>>{}));
     using SmemCopyAtomO = Copy_Atom<SM90_U32x4_STSM_N, Element>;
-    using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;
+    using SmemCopyAtomOaccum = Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>;
 
     static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
     static_assert(kHeadDim % kGmemElemsPerLoad == 0, "kHeadDim must be a multiple of kGmemElemsPerLoad");
@@ -116,7 +116,7 @@ struct Flash_fwd_kernel_traits_mla {
             Shape<Int<kNThreadsS / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
             Stride<Int<kGmemThreadsPerRow>, _1>>;
     using GmemTiledCopyO = decltype(make_tiled_copy(
-            Copy_Atom<DefaultCopy, Element>{},
+            Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
             GmemLayoutAtomO{},
             Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
 
@@ -126,7 +126,7 @@ struct Flash_fwd_kernel_traits_mla {
             Shape<Int<kNThreadsS / kGmemThreadsPerRowAccum>, Int<kGmemThreadsPerRowAccum>>,
             Stride<Int<kGmemThreadsPerRowAccum>, _1>>;
     using GmemTiledCopyOaccum = decltype(make_tiled_copy(
-            Copy_Atom<DefaultCopy, ElementAccum>{},
+            Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
             GmemLayoutAtomOaccum{},
             Layout<Shape<_1, _4>>{}));  // Val layout, 4 vals per store
 
@@ -153,6 +153,7 @@ namespace flash {
 using namespace cute;
 
 static constexpr int MaxNumPagesPerBlock = 256;
+using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
 template<typename Kernel_traits>
 struct SharedStorageMLA {
@@ -163,6 +164,7 @@ struct SharedStorageMLA {
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutP>> smem_p;
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_scale;
             cute::array_aligned<int, MaxNumPagesPerBlock> smem_block_table;
+            cute::array_aligned<Barrier, 2> barrier_K;
         };
         struct {
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_max;
@@ -277,8 +279,8 @@ __forceinline__ __device__ void store(const Flash_fwd_mla_params &params, const 
     );
 }
 
-template<typename Kernel_traits, bool Is_causal, typename SharedStorage>
-__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_fwd_mla_params &params,
+template<typename Kernel_traits, typename TmaK, bool Is_causal, typename SharedStorage>
+__forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_fwd_mla_params &params, const TmaK &tmaK,
                                                                    const int bidb, const int bidh, const int m_block,
                                                                    const int n_split_idx, const int seqlen_k,
                                                                    const int n_block_min, const int n_block_max, const bool NoSplit,
@@ -430,96 +432,32 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                                                               params.seqlen_q - m_block * kBlockM);
         cp_async_fence();
 
+        Tensor mK = tmaK.get_tma_tensor(make_shape(params.page_block_size, params.d, params.h_k, params.num_blocks));
+        auto cta_tmak = tmaK.get_slice(_0{});
+        Tensor tKsK = group_modes<1, 3>(cta_tmak.partition_D(sK));
+        constexpr uint32_t TmaTransactionBytesK = size(sK) * sizeof_bits_v<Element> / 8;
+        Barrier *barrier_K = shared_storage.barrier_K.data();
+        bool predict = (tidx == kNThreadsS);
+        if (predict) {
+            barrier_K[0].init(1);
+            barrier_K[1].init(1);
+            // Make initialized barrier visible in async proxy
+            cutlass::arch::fence_view_async_shared();
+        }
+
         flash::cp_async_wait<1>();  // Wait for block_table ready.
         cutlass::arch::NamedBarrier::sync(kNThreads - kNThreadsS, static_cast<int>(NamedBarriers::BlockTableReady));
 
-        // We move K and V to the last block.
-        const index_t row_offset_k = block_table[n_block_max - 1] * params.k_batch_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
-        Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
-                                Shape<Int<kBlockN>, Int<kHeadDim>>{},
-                                make_stride(params.k_row_stride, _1{}));
-        typename Kernel_traits::GmemTiledCopy gmem_tiled_copy_K;
-        auto gmem_thr_copy_K = gmem_tiled_copy_K.get_thread_slice(tidx - kNThreadsS);
-        Tensor tKgK = gmem_thr_copy_K.partition_S(gK);
-        Tensor tKsK = gmem_thr_copy_K.partition_D(sK);
-        Tensor cK = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));  // (BLK_N,BLK_K) -> (blk_n,blk_k)
-        Tensor tKcK = gmem_thr_copy_K.partition_S(cK);  // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
-        Tensor tKpK = make_tensor<bool>(make_shape(size<2>(tKsK)));
-
-        using KV_type0 = typename Kernel_traits::KV_type0;
-        using KV_type1 = typename Kernel_traits::KV_type1;
-        constexpr int KV_type0_bits = sizeof_bits<KV_type0>::value;
-        constexpr int KV_type1_bits = sizeof_bits<KV_type1>::value;
-        assert(params.k_row_stride * 32 % KV_type0_bits == 0);
-        const int64_t kquant0_row_stride = params.k_row_stride * 32 / KV_type0_bits;
-        Tensor gKQuant0 = make_tensor(make_gmem_ptr(recast_ptr<KV_type0>(recast_ptr<int32_t>(params.k_ptr) + row_offset_k)),
-                                      Shape<Int<kBlockN>, Int<Kernel_traits::SplitLength>>{},
-                                      make_stride(kquant0_row_stride, _1{}));
-        static_assert(Kernel_traits::SplitLength * KV_type0_bits % 32 == 0);
-        assert(params.k_row_stride * 32 % KV_type1_bits == 0);
-        const int64_t kquant1_row_stride = params.k_row_stride * 32 / KV_type1_bits;
-        Tensor gKQuant1 = make_tensor(make_gmem_ptr(recast_ptr<KV_type1>(recast_ptr<int32_t>(params.k_ptr) + row_offset_k + Kernel_traits::SplitLength * KV_type0_bits / 32)),
-                                      Shape<Int<kBlockN>, Int<kHeadDim - Kernel_traits::SplitLength>>{},
-                                      make_stride(kquant1_row_stride, _1{}));
-        typename Kernel_traits::GmemTiledCopyKQuant0 gmem_tiled_copy_KQuant0;
-        auto gmem_thr_copy_KQuant0 = gmem_tiled_copy_KQuant0.get_thread_slice(tidx - kNThreadsS);
-        Tensor tKQuant0gKQuant0 = gmem_thr_copy_KQuant0.partition_S(gKQuant0);
-        Tensor tKQuant0rKQuant0 = make_fragment_like(tKQuant0gKQuant0);
-        Tensor tKQuant0rKQuant0_high = make_tensor<Element>(tKQuant0rKQuant0.layout());
-        typename Kernel_traits::GmemTiledCopyKQuant1 gmem_tiled_copy_KQuant1;
-        auto gmem_thr_copy_KQuant1 = gmem_tiled_copy_KQuant1.get_thread_slice(tidx - kNThreadsS);
-        Tensor tKQuant1gKQuant1 = gmem_thr_copy_KQuant1.partition_S(gKQuant1);
-        typename Kernel_traits::SmemTiledCopyK smem_tiled_copy_K;
-        Tensor tKQuant1rKQuant1 = make_fragment_like(tKQuant1gKQuant1);
-        Tensor tKQuant1rKQuant1_high = make_tensor<Element>(tKQuant1rKQuant1.layout());
-        auto LDG_K = [&](const int n) {
-#pragma unroll
-            for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
-                copy(gmem_tiled_copy_KQuant0, tKQuant0gKQuant0(_, n, k), tKQuant0rKQuant0(_, n, k));
-            }
-            for (int k = 0; k < size<2>(tKQuant1gKQuant1); ++k) {
-                copy(gmem_tiled_copy_KQuant1, tKQuant1gKQuant1(_, n, k), tKsK(_, n, size<2>(tKQuant0gKQuant0) + k));
-            }
-        };
-        auto Cast_K = [&](const int n) {
-#pragma unroll
-            for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
-                convert_type_out(tKQuant0rKQuant0(_, n, k), tKQuant0rKQuant0_high(_, n, k));
-            }
-        };
-        auto STS_K = [&](const int n) {
-#pragma unroll
-            for (int k = 0; k < size<2>(tKQuant0gKQuant0); ++k) {
-                copy(smem_tiled_copy_K, tKQuant0rKQuant0_high(_, n, k), tKsK(_, n, k));
-            }
-        };
+        int phase = 0;
         auto LoadK = [&](int n_block) {
-            if (n_block <= n_block_min) { return; }
-            // Advance gK
-            const index_t offset = (block_table[n_block - 1] - block_table[n_block]) * params.k_batch_stride;
-
-            tKgK.data() = tKgK.data() + offset;
-            tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset);
-            tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset);
-
-            // Double buffer for sK
-            const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
-            tKsK.data() = tKsK.data() + sK_offset;
-
-            if (Kernel_traits::SplitLength == 0) {
-                flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy_K, tKgK, tKsK, tKcK, tKpK);
-            } else {
-#pragma unroll
-                for (int n = 0; n < size<1>(tKsK); ++n) {
-                    LDG_K(n);
-                }
-#pragma unroll
-                for (int n = 0; n < size<1>(tKsK); ++n) {
-                    Cast_K(n);
-                    STS_K(n);
-                }
+            if (predict) {
+                Tensor gK = local_tile(mK,
+                                       Shape<Int<kBlockN>, Int<kHeadDim>>{},
+                                       make_coord(0, 0, bidh / params.h_h_k_ratio, block_table[n_block]));
+                Tensor tKgK = group_modes<1, 3>(cta_tmak.partition_S(gK)); // (TMA,REST)
+                barrier_K[phase].arrive_and_expect_tx(TmaTransactionBytesK);
+                cute::copy(tmaK.with(reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType &>(barrier_K[phase])), tKgK(_, 0), tKsK(_, 0));
             }
-            cute::cp_async_fence();
         };
 
         if (n_block % 2 == 1) {
@@ -529,30 +467,22 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
             tOrVt.data() = tOrVt.data() + sK_offset / 8;
         }
 
-        // We need to clear the sK smem tiles because K is V.
-        if (Kernel_traits::SplitLength == 0) {
-            flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/true>(gmem_tiled_copy_K, tKgK, tKsK, tKcK, tKpK,
-                                                                                         seqlen_k - n_block * kBlockN);
-        } else {
-#pragma unroll
-            for (int n = 0; n < size<1>(tKsK); ++n) {
-                if (get<0>(tKcK(0, n, 0)) < seqlen_k - n_block * kBlockN) {
-                    LDG_K(n);
-                    Cast_K(n);
-                    STS_K(n);
-                } else {
-                    clear(tKsK(_, n, _));
-                }
-            }
-        }
-        cute::cp_async_fence();
+        LoadK(n_block);
+        flash::cp_async_wait<0>();
 
 #pragma unroll 1
         for (; n_block >= n_block_min; --n_block) {
-            flash::cp_async_wait<0>();
+            if (predict) {
+                barrier_K[phase].wait((n_block_max - n_block - 1) / 2 % 2);
+            }
             __syncthreads();
 
-            LoadK(n_block);
+            phase ^= 1;
+            const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
+            tKsK.data() = tKsK.data() + sK_offset;
+            if (n_block > n_block_min) {
+                LoadK(n_block - 1);
+            }
 
             cutlass::arch::NamedBarrier::sync(kNThreads, static_cast<int>(NamedBarriers::SReady));
 
@@ -569,8 +499,6 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
             Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
             flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_o, tOrP, tOrVt, tOrO);
 
-            // Double buffer for sK
-            const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
             tOrVt.data() = tOrVt.data() + sK_offset / 8;
         }
 
@@ -762,9 +690,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
         store<Kernel_traits, true>(params, bidb, bidh, m_block, n_split_idx, shared_storage, acc_o, softmax);
 }
 
-template<typename Kernel_traits, bool Is_causal, typename SharedStorage>
+template<typename Kernel_traits, typename TmaK, bool Is_causal, typename SharedStorage>
 __global__ void __launch_bounds__(Kernel_traits::kNThreads, 1, 1)
-flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params) {
+flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params, __grid_constant__ const TmaK tmaK) {
     constexpr int kBlockN = Kernel_traits::kBlockN;
     const int m_block = blockIdx.x;
     const int bidh = blockIdx.y;
@@ -793,7 +721,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const Flash_fwd_mla_params params
             __syncthreads();  // Barrier between two tiles.
         }
         if constexpr (Kernel_traits::Shared_KV)
-            flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, Is_causal>(params, batch_id, bidh, m_block, n_split_idx, seqlen_k, n_block_min, n_block_max, NoSplit, shared_storage);
+            flash::compute_attn_1rowblock_splitkv_mla<Kernel_traits, TmaK, Is_causal>(params, tmaK, batch_id, bidh, m_block, n_split_idx, seqlen_k, n_block_min, n_block_max, NoSplit, shared_storage);
         else
             flash::compute_attn_1rowblock_splitkv_mha<Kernel_traits, Is_causal>(params, batch_id, bidh, m_block, n_split_idx, seqlen_k, n_block_min, n_block_max, NoSplit, shared_storage);
     }
@@ -895,12 +823,20 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
 template<typename Kernel_traits, typename SharedStorage>
 void run_flash_splitkv_fwd_mla(Flash_fwd_mla_params &params, cudaStream_t stream) {
     FLASH_ASSERT(params.page_block_size == Kernel_traits::kBlockN);
+    Tensor gK = make_tensor(reinterpret_cast<typename Kernel_traits::Element const *>(params.k_ptr),
+                            make_shape(params.page_block_size, params.d, params.h_k, params.num_blocks),
+                            make_stride(params.k_row_stride, 1, params.k_head_stride, params.k_batch_stride));
+    auto tmaK = make_tma_copy(SM90_TMA_LOAD{},
+                              gK,
+                              typename Kernel_traits::SmemLayoutK{},
+                              Shape<Int<Kernel_traits::kBlockN>, Int<Kernel_traits::kHeadDim>>{},
+                              _1{});
     const int num_m_block = cute::ceil_div(params.seqlen_q, Kernel_traits::kBlockM);
     BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-        auto kernel = &flash::flash_fwd_splitkv_mla_kernel<Kernel_traits, Is_causal, SharedStorage>;
+        auto kernel = &flash::flash_fwd_splitkv_mla_kernel<Kernel_traits, decltype(tmaK), Is_causal, SharedStorage>;
         constexpr size_t smem_size = sizeof(SharedStorage);
         CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-        kernel<<<dim3(num_m_block, params.h, params.num_sm_parts), Kernel_traits::kNThreads, smem_size, stream>>>(params);
+        kernel<<<dim3(num_m_block, params.h, params.num_sm_parts), Kernel_traits::kNThreads, smem_size, stream>>>(params, tmaK);
     });
     CHECK_CUDA_KERNEL_LAUNCH();
 
@@ -925,7 +861,7 @@ void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream) 
         KVCACHE_QUANTIZATION_TYPE_SWITCH(params.kvcache_quantization_type, [&] {
             KVCACHE_QUANTIZATION_SPLIT_LENGTH_SWITCH(params.kvcache_quantization_split_length, [&] {
                 using Kernel_traits = Flash_fwd_kernel_traits_mla<576, 64, 64, 8, T, 512, true, SplitLength, quant_type0, quant_type1>;
-                run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMLA<Kernel_traits>>(params, stream);
+//                run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMLA<Kernel_traits>>(params, stream);
             });
         });
     }
@@ -937,5 +873,5 @@ void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stre
     FLASH_ASSERT(params.d_v == 128);
     FLASH_ASSERT(params.kvcache_quantization_type == 0);
     using Kernel_traits = Flash_fwd_kernel_traits_mla<128, 64, 128, 4, T, 128, false>;
-    run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
+//    run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
 }

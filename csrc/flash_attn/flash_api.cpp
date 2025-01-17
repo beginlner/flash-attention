@@ -1769,6 +1769,8 @@ mha_fwd_kvcache_mla(
     params.seqlen_q = seqlen_q;
     params.cu_seqlens_k = seqlens_k.data_ptr<int>();
     params.h = num_heads;
+    params.h_k = num_heads_k;
+    params.num_blocks = num_blocks;
     params.h_h_k_ratio = num_heads / num_heads_k;
     params.ngroups = ngroups;
     params.is_causal = is_causal;
