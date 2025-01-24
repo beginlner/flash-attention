@@ -942,8 +942,6 @@ void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stre
 
 __global__ void __launch_bounds__(256, 1, 1)
 get_mla_metadata_kernel(__grid_constant__ const Mla_metadata_params params) {
-    if (threadIdx.x > 0) return;
-
     int *seqlens_k_ptr = params.seqlens_k_ptr;
     int *tile_scheduler_metadata_ptr = params.tile_scheduler_metadata_ptr;
     int *num_splits_ptr = params.num_splits_ptr;
@@ -991,5 +989,6 @@ get_mla_metadata_kernel(__grid_constant__ const Mla_metadata_params params) {
 }
 
 void get_mla_metadata_func(Mla_metadata_params &params, cudaStream_t stream) {
-    get_mla_metadata_kernel<<<256, 1, 0, stream>>>(params);
+    get_mla_metadata_kernel<<<1, 1, 0, stream>>>(params);
+    CHECK_CUDA_KERNEL_LAUNCH();
 }
