@@ -55,3 +55,15 @@ void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream);
 
 template<typename T>
 void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stream);
+
+struct Mla_metadata_params {
+    int *seqlens_k_ptr;
+    int *tile_scheduler_metadata_ptr;
+    int *num_splits_ptr;
+    int batch_size;
+    int block_size_n;
+    int fixed_overhead_num_blocks;
+    int num_sm_parts;
+};
+
+void get_mla_metadata_func(Mla_metadata_params &params, cudaStream_t stream);

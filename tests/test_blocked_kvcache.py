@@ -5,7 +5,7 @@ import random
 from flash_attn.flash_attn_interface import *
 
 b, s, h_q, h_kv = 64, 4096, 64, 1
-s_q = 3
+s_q = 4
 causal = True
 shared_kv = True
 dtype = torch.bfloat16
@@ -88,9 +88,7 @@ def test_flash_attention(d, v_dim):
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     blocked_v = torch.randn(block_table.numel(), block_size, h_kv, v_dim) if not shared_kv else blocked_k[..., :v_dim]
     try:
-        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens.cpu(), (h_q // h_kv) * s_q, h_kv, block_size)
-        tile_scheduler_metadata = tile_scheduler_metadata.cuda()
-        num_splits = num_splits.cuda()
+        tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens, (h_q // h_kv) * s_q, h_kv, block_size)
         # print(tile_scheduler_metadata)
         # print(num_splits)
         # print(tile_scheduler_metadata.shape, num_splits.shape)

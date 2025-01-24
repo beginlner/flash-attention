@@ -1604,7 +1604,6 @@ get_mla_metadata(
     static constexpr int block_size_m = 64;
     static constexpr int fixed_overhead_num_blocks = 5;
 
-    TORCH_CHECK(seqlens_k.is_cpu());
     TORCH_CHECK(seqlens_k.is_contiguous());
     TORCH_CHECK(seqlens_k.dtype() == torch::kInt32);
     int batch_size = seqlens_k.size(0);
@@ -1620,13 +1619,25 @@ get_mla_metadata(
     int *tile_scheduler_metadata_ptr = tile_scheduler_metadata.data_ptr<int>();
     int *num_splits_ptr = num_splits.data_ptr<int>();
 
-    std::vector<int> num_blocks;
-    num_blocks.resize(batch_size);
+    if (seqlens_k.is_cuda()) {
+        at::cuda::CUDAGuard device_guard{(char)seqlens_k.get_device()};
+        auto stream = at::cuda::getCurrentCUDAStream().stream();
+        Mla_metadata_params params = {};
+        params.seqlens_k_ptr = seqlens_k_ptr;
+        params.tile_scheduler_metadata_ptr = tile_scheduler_metadata_ptr;
+        params.num_splits_ptr = num_splits_ptr;
+        params.batch_size = batch_size;
+        params.block_size_n = block_size_n;
+        params.fixed_overhead_num_blocks = fixed_overhead_num_blocks;
+        params.num_sm_parts = num_sm_parts;
+        get_mla_metadata_func(params, stream);
+        return {tile_scheduler_metadata, num_splits};
+    }
+
     int total_num_blocks = 0;
     for (int i = 0; i < batch_size; ++i) {
-        int num_block = cutlass::ceil_div(seqlens_k_ptr[i], block_size_n);
-        num_blocks[i] = num_block;
-        total_num_blocks += num_block + fixed_overhead_num_blocks;
+        int num_blocks = cutlass::ceil_div(seqlens_k_ptr[i], block_size_n);
+        total_num_blocks += num_blocks + fixed_overhead_num_blocks;
     }
     int payload = cutlass::ceil_div(total_num_blocks, num_sm_parts) + fixed_overhead_num_blocks;
 
@@ -1638,7 +1649,8 @@ get_mla_metadata(
         tile_scheduler_metadata_ptr[i * TileSchedulerMetaDataSize + 4] = now_n_split_idx;
         int remain_payload = payload;
         while (now_idx < batch_size) {
-            int now_remain_blocks = num_blocks[now_idx] - now_block;
+            int num_blocks = cutlass::ceil_div(seqlens_k_ptr[now_idx], block_size_n);
+            int now_remain_blocks = num_blocks - now_block;
             if (remain_payload >= now_remain_blocks + fixed_overhead_num_blocks) {
                 num_splits_ptr[now_idx + 1] = num_splits_ptr[now_idx] + (now_n_split_idx + 1);
                 remain_payload -= now_remain_blocks + fixed_overhead_num_blocks;
