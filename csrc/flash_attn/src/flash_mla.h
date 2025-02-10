@@ -57,9 +57,9 @@ template<typename T>
 void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stream);
 
 struct Mla_metadata_params {
-    int *seqlens_k_ptr;
-    int *tile_scheduler_metadata_ptr;
-    int *num_splits_ptr;
+    int *__restrict__ seqlens_k_ptr;
+    int *__restrict__ tile_scheduler_metadata_ptr;
+    int *__restrict__ num_splits_ptr;
     int batch_size;
     int block_size_n;
     int fixed_overhead_num_blocks;
