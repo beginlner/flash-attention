@@ -19,15 +19,12 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 import torch
 from torch.utils.cpp_extension import (
     BuildExtension,
-    CppExtension,
     CUDAExtension,
     CUDA_HOME,
 )
 
-
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
-
 
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -314,6 +311,20 @@ class NinjaBuildExtension(BuildExtension):
 
         super().__init__(*args, **kwargs)
 
+
+legacy_join_cuda_home = torch.utils.cpp_extension._join_cuda_home
+CUDA_HOME = torch.utils.cpp_extension.CUDA_HOME
+
+if not os.path.exists('/hf_shared/hfai_envs/zhaochenggang/nvcc-12.6_0/bin/nvcc'):
+    print('NVCC 12.6 not found, maybe lead to a lower performance.')
+else:
+    def join_cuda_home(*paths):
+        if tuple(paths) == ('bin', 'nvcc'):
+            return '/hf_shared/hfai_envs/zhaochenggang/nvcc-12.6_0/bin/nvcc'
+        return os.path.join(CUDA_HOME, *paths)
+
+
+    torch.utils.cpp_extension._join_cuda_home = join_cuda_home
 
 setup(
     name=PACKAGE_NAME,
