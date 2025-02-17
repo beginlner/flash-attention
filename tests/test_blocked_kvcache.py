@@ -4,8 +4,8 @@ import torch
 import random
 from flash_attn.flash_attn_interface import *
 
-b, s, h_q, h_kv = 64, 4096, 64, 1
-s_q = 4
+b, s, h_q, h_kv = 128, 4096, 128, 1
+s_q = 2
 causal = True
 shared_kv = True
 dtype = torch.bfloat16
@@ -18,7 +18,7 @@ random.seed(0)
 
 cache_seqlens = torch.full((b,), s, dtype=torch.int32)
 for i in range(b):
-    cache_seqlens[i] = min(max(random.normalvariate(1000, 1000), s_q), 20480)
+    cache_seqlens[i] = max(random.normalvariate(s, s / 2), s_q)
 cache_seqlens[0] = 65536
 cache_seqlens = torch.sort(cache_seqlens, descending=True).values
 total_seqlens = cache_seqlens.sum().item()

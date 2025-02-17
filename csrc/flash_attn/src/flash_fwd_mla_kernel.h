@@ -152,7 +152,7 @@ namespace flash {
 
 using namespace cute;
 
-static constexpr int MaxNumPagesPerBlock = 256;
+static constexpr int MaxNumPagesPerBlock = 512;
 
 template<typename Kernel_traits>
 struct SharedStorageMLA {
