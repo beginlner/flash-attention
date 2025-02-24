@@ -40,9 +40,9 @@ DEFINE_FLASH_BACKWARD_KERNEL(flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel, bool 
     #endif
 }
 
-template<bool Clear_dQaccum=true, typename Kernel_traits>
+template<bool Clear_dQaccum=true, typename Kernel_traits, bool input_odo>
 __global__ void flash_bwd_dot_do_o_kernel(const Flash_bwd_params params) {
-    flash::compute_dot_do_o<Clear_dQaccum, Kernel_traits>(params);
+    flash::compute_dot_do_o<Clear_dQaccum, Kernel_traits, input_odo>(params);
 }
 
 template<typename Kernel_traits>
@@ -62,10 +62,18 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream) 
     }
     dim3 grid_n(gridDimx, params.b, params.h);
 
-    if (!params.deterministic) {
-        flash_bwd_dot_do_o_kernel<true, Kernel_traits><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+    if (params.o_row_stride) {
+        if (!params.deterministic) {
+            flash_bwd_dot_do_o_kernel<true, Kernel_traits, false><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+        } else {
+            flash_bwd_dot_do_o_kernel<false, Kernel_traits, false><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+        }
     } else {
-        flash_bwd_dot_do_o_kernel<false, Kernel_traits><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+        if (!params.deterministic) {
+            flash_bwd_dot_do_o_kernel<true, Kernel_traits, true><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+        } else {
+            flash_bwd_dot_do_o_kernel<false, Kernel_traits, true><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
+        }
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
