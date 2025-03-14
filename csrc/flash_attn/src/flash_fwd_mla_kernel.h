@@ -940,6 +940,8 @@ void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stre
     run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
 }
 
+static constexpr int MaxBatchSize = 4096;
+
 __global__ void __launch_bounds__(256, 1, 1)
 get_mla_metadata_kernel(__grid_constant__ const Mla_metadata_params params) {
     int *seqlens_k_ptr = params.seqlens_k_ptr;
@@ -950,10 +952,8 @@ get_mla_metadata_kernel(__grid_constant__ const Mla_metadata_params params) {
     int fixed_overhead_num_blocks = params.fixed_overhead_num_blocks;
     int num_sm_parts = params.num_sm_parts;
 
-    __shared__ int num_blocks_shared[4096];
-    assert(batch_size <= 4096);
-    __shared__ int num_splits_shared[4096];
-    assert(batch_size < 4096);
+    __shared__ int num_blocks_shared[MaxBatchSize];
+    __shared__ int num_splits_shared[MaxBatchSize];
 
     int total_num_blocks = 0;
     for (int i = threadIdx.x; i < batch_size; i += 32) {
@@ -1011,6 +1011,7 @@ get_mla_metadata_kernel(__grid_constant__ const Mla_metadata_params params) {
 }
 
 void get_mla_metadata_func(Mla_metadata_params &params, cudaStream_t stream) {
+    FLASH_ASSERT(params.batch_size < MaxBatchSize);
     get_mla_metadata_kernel<<<1, 32, 0, stream>>>(params);
     CHECK_CUDA_KERNEL_LAUNCH();
 }
