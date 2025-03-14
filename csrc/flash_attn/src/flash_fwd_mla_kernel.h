@@ -378,8 +378,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                                softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2)
                                                : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*//*Is_local=*/false, /*rescale_o=*/false>(acc_s, acc_o, params.scale_softmax_log2);
 
-            Tensor rP = make_tensor<Element>(acc_s.layout());
-            cute::copy(flash::convert_type<Element>(acc_s), rP);
+            Tensor rP = flash::convert_type<Element>(acc_s);
             cute::copy(rP, tPsP);
             cute::copy(scale_o, tScale_osScale_o);
 
