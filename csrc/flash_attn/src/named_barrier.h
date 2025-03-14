@@ -10,7 +10,6 @@ namespace flash {
 enum class NamedBarriers {
     SReady = 1,
     SoftmaxReady = 2,
-    BlockTableReady = 3,
 };
 
 } // flash

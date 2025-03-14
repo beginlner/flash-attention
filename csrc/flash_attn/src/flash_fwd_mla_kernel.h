@@ -162,7 +162,6 @@ struct SharedStorageMLA {
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutK> * 2> smem_k;  // Double buffer
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutP>> smem_p;
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_scale;
-            cute::array_aligned<int, MaxNumPagesPerBlock> smem_block_table;
         };
         struct {
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutRow>> smem_max;
@@ -401,16 +400,7 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         cutlass::arch::NamedBarrier::arrive(kNThreads, static_cast<int>(NamedBarriers::SoftmaxReady));
     } else {
         const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
-        {
-            assert(n_block_max - n_block_min <= MaxNumPagesPerBlock);
-            // Load block_table from global memory to shared memory
-            int *block_table_shared = reinterpret_cast<int *>(shared_storage.smem_block_table.data());
-            for (int i = tidx - kNThreadsS; i <= n_block_max - n_block_min - 1; i += kNThreads - kNThreadsS) {
-                SM80_CP_ASYNC_CACHEALWAYS<int>::copy(block_table[i + n_block_min], block_table_shared[i]);
-            }
-            cp_async_fence();
-            block_table = block_table_shared - n_block_min;
-        }
+        int cur_block_table = __ldg(&block_table[n_block]);
 
         const index_t row_offset_q = bidb * params.q_batch_stride + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
         Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
@@ -427,13 +417,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         // We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
         flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true>(gmem_tiled_copy_Q, tQgQ, tQsQ, tQcQ, tQpQ,
                                                               params.seqlen_q - m_block * kBlockM);
-        cp_async_fence();
 
-        flash::cp_async_wait<1>();  // Wait for block_table ready.
-        cutlass::arch::NamedBarrier::sync(kNThreads - kNThreadsS, static_cast<int>(NamedBarriers::BlockTableReady));
-
-        // We move K and V to the last block.
-        const index_t row_offset_k = block_table[n_block_max - 1] * params.k_batch_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
+        const index_t row_offset_k = (bidh / params.h_h_k_ratio) * params.k_head_stride;
         Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
                                 Shape<Int<kBlockN>, Int<kHeadDim>>{},
                                 make_stride(params.k_row_stride, _1{}));
@@ -494,17 +479,15 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         };
         auto LoadK = [&](int n_block) {
             if (n_block <= n_block_min) { return; }
-            // Advance gK
-            const index_t offset = (block_table[n_block - 1] - block_table[n_block]) * params.k_batch_stride;
-
-            tKgK.data() = tKgK.data() + offset;
-            tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset);
-            tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset);
 
             // Double buffer for sK
             const int sK_offset = n_block % 2 == 0 ? size(sK) : -size(sK);
             tKsK.data() = tKsK.data() + sK_offset;
 
+            const index_t offset_k = cur_block_table * params.k_batch_stride;
+            tKgK.data() = tKgK.data() + offset_k;
+            tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset_k);
+            tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset_k);
             if (Kernel_traits::SplitLength == 0) {
                 flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy_K, tKgK, tKsK, tKcK, tKpK);
             } else {
@@ -518,6 +501,9 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                     STS_K(n);
                 }
             }
+            tKgK.data() = tKgK.data() + -offset_k;
+            tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + -offset_k);
+            tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + -offset_k);
             cute::cp_async_fence();
         };
 
@@ -529,6 +515,10 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         }
 
         // We need to clear the sK smem tiles because K is V.
+        const index_t offset_k = cur_block_table * params.k_batch_stride;
+        tKgK.data() = tKgK.data() + offset_k;
+        tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + offset_k);
+        tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + offset_k);
         if (Kernel_traits::SplitLength == 0) {
             flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/true>(gmem_tiled_copy_K, tKgK, tKsK, tKcK, tKpK,
                                                                                          seqlen_k - n_block * kBlockN);
@@ -544,7 +534,14 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
                 }
             }
         }
+        tKgK.data() = tKgK.data() + -offset_k;
+        tKQuant0gKQuant0.data() = recast_ptr<KV_type0>(recast_ptr<int32_t>(tKQuant0gKQuant0.data()) + -offset_k);
+        tKQuant1gKQuant1.data() = recast_ptr<KV_type1>(recast_ptr<int32_t>(tKQuant1gKQuant1.data()) + -offset_k);
         cute::cp_async_fence();
+
+        if (n_block - 1 >= n_block_min) {
+            cur_block_table = __ldg(&block_table[n_block - 1]);
+        }
 
 #pragma unroll 1
         for (; n_block >= n_block_min; --n_block) {
@@ -554,6 +551,10 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
             LoadK(n_block);
 
             cutlass::arch::NamedBarrier::sync(kNThreads, static_cast<int>(NamedBarriers::SReady));
+
+            if (n_block - 2 >= n_block_min) {
+                cur_block_table = __ldg(&block_table[n_block - 2]);
+            }
 
             typename Kernel_traits::TiledMma tiled_mma;
             auto acc_s_layout = flash::convert_gmma_to_mma_tensor(partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{}).layout());
