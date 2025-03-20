@@ -152,8 +152,6 @@ namespace flash {
 
 using namespace cute;
 
-static constexpr int MaxNumPagesPerBlock = 512;
-
 template<typename Kernel_traits>
 struct SharedStorageMLA {
     union {
@@ -178,7 +176,6 @@ struct SharedStorageMHA {
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutQ>> smem_q;
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutK>> smem_k;
             cute::array_aligned<typename Kernel_traits::Element, cute::cosize_v<typename Kernel_traits::SmemLayoutV>> smem_v;
-            cute::array_aligned<int, MaxNumPagesPerBlock> smem_block_table;
         };
         struct {
             cute::array_aligned<typename Kernel_traits::ElementAccum, cute::cosize_v<typename Kernel_traits::SmemLayoutO>> smem_o;
@@ -611,8 +608,8 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
 
     const index_t row_offset_q = bidb * params.q_batch_stride + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
-    const index_t row_offset_k = block_table[n_block] * params.k_batch_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
-    const index_t row_offset_v = block_table[n_block] * params.v_batch_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
+    const index_t row_offset_k = (bidh / params.h_h_k_ratio) * params.k_head_stride;
+    const index_t row_offset_v = (bidh / params.h_h_k_ratio) * params.v_head_stride;
     Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
                             Shape<Int<kBlockM>, Int<kHeadDim>>{},
                             make_stride(params.q_row_stride, _1{}));
@@ -644,38 +641,29 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
     Tensor tKpK = make_tensor<bool>(make_shape(size<2>(tKsK)));
     Tensor tVpV = make_tensor<bool>(make_shape(size<2>(tVsV)));
 
-    {
-        assert(n_block_max - n_block_min <= MaxNumPagesPerBlock);
-        // Load block_table from global memory to shared memory
-        int *block_table_shared = reinterpret_cast<int *>(shared_storage.smem_block_table.data());
-        for (int i = tidx; i <= n_block_max - n_block_min - 1; i += kNThreads) {
-            SM80_CP_ASYNC_CACHEALWAYS<int>::copy(block_table[i + n_block_min], block_table_shared[i]);
-        }
-        block_table = block_table_shared - n_block_min;
-    }
-
     // We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true>(
             gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ, params.seqlen_q - m_block * kBlockM);
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
+    const index_t offset_k = block_table[n_block] * params.k_batch_stride;
+    tKgK.data() = tKgK.data() + offset_k;
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true>(
             gmem_tiled_copy_QKV, tKgK, tKsK, tKcK, tKpK, seqlen_k - n_block * kBlockN);
+    tKgK.data() = tKgK.data() + -offset_k;
     cute::cp_async_fence();
 
     auto LoadK = [&](int n_block) {
-        // Advance gK
-        const index_t offset = (block_table[n_block] - block_table[n_block + 1]) * params.k_batch_stride;
-        tKgK.data() = tKgK.data() + offset;
-
+        const index_t offset_k = block_table[n_block] * params.k_batch_stride;
+        tKgK.data() = tKgK.data() + offset_k;
         flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy_QKV, tKgK, tKsK, tKcK, tKpK);
+        tKgK.data() = tKgK.data() + -offset_k;
         cute::cp_async_fence();
     };
     auto LoadV = [&](int n_block) {
-        // Advance gV
-        const index_t offset = (block_table[n_block] - block_table[n_block + 1]) * params.v_batch_stride;
-        tVgV.data() = tVgV.data() + offset;
-
+        const index_t offset_v = block_table[n_block] * params.v_batch_stride;
+        tVgV.data() = tVgV.data() + offset_v;
         flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy_QKV, tVgV, tVsV, tVcV, tVpV);
+        tVgV.data() = tVgV.data() + -offset_v;
         cute::cp_async_fence();
     };
 
@@ -708,8 +696,11 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mha(const Flash_f
         const bool is_first_masking_step = masking_step == n_masking_steps;
         if (is_first_masking_step) {
             // Clear the smem tiles to account for predicated off loads
+            const index_t offset_v = block_table[n_block] * params.v_batch_stride;
+            tVgV.data() = tVgV.data() + offset_v;
             flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/true, /*Clear_OOB_MN=*/true>(
                     gmem_tiled_copy_QKV, tVgV, tVsV, tVcV, tVpV, seqlen_k - n_block * kBlockN);
+            tVgV.data() = tVgV.data() + -offset_v;
             cute::cp_async_fence();
         } else {
             LoadV(n_block);
