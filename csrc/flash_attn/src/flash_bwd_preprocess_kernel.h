@@ -54,7 +54,7 @@ __forceinline__ __device__ void dot_do_o(Tensor<Engine0, Layout0> const &do_, Te
 
 // Just compute dot(do, o) and write the result (softmax_d) to global memory as a separate kernel.
 // This is used in the case where we want to parallelize the backward across seqlen_k.
-template<bool Clear_dQaccum=true, typename Kernel_traits, typename Params>
+template<bool Clear_dQaccum=true, typename Kernel_traits, bool input_odo, typename Params>
 __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
     using GradElement = typename Kernel_traits::GradElement;
     using OutElement = typename Kernel_traits::OutElement;
@@ -125,17 +125,19 @@ __forceinline__ __device__ void compute_dot_do_o(const Params &params) {
 
     Tensor tdOrdO = make_fragment_like(tdOgdO);
     Tensor tdOrO = make_fragment_like(tdOgO);
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true>(
-        gmem_tiled_copy_dO, tdOgdO, tdOrdO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
-    );
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true>(
-        gmem_tiled_copy_O, tdOgO, tdOrO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
-    );
-    // By right we need to scale dP up by 1/p_dropout, but instead we don't and only scale the final
-    // results (dQ and dK) by 1/p_dropout. So we need to keep dP_sum scaled down by p_dropout here,
-    // so that (dP - dP_sum) is on the same scale.
-    dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, dP_sum,
-                                                Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout, Descale_DO);
+    if (!input_odo) {
+        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true>(
+            gmem_tiled_copy_dO, tdOgdO, tdOrdO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
+        );
+        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true>(
+            gmem_tiled_copy_O, tdOgO, tdOrO, tdOcdO, tdOpdO, binfo.actual_seqlen_q - m_block * kBlockM
+        );
+        // By right we need to scale dP up by 1/p_dropout, but instead we don't and only scale the final
+        // results (dQ and dK) by 1/p_dropout. So we need to keep dP_sum scaled down by p_dropout here,
+        // so that (dP - dP_sum) is on the same scale.
+        dot_do_o<Kernel_traits::kGmemThreadsPerRow>(tdOrdO, tdOrO, dP_sum,
+                                                    Kernel_traits::kNThreads / (Kernel_traits::kGmemThreadsPerRow), params.p_dropout, Descale_DO);
+    }
     if (Clear_dQaccum) {
         // We're actually not zero'ing out all of dQaccum, but only the part that we're going to
         // do atomicAdds on.
