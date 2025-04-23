@@ -109,7 +109,7 @@ if not SKIP_CUDA_BUILD:
     fast_build_flag = [
         "-DFLASHATTENTION_DISABLE_DROPOUT",
         "-DFLASHATTENTION_DISABLE_UNEVEN_K",
-        "-DFLASHATTENTION_DISABLE_LOCAL",
+        # "-DFLASHATTENTION_DISABLE_LOCAL",
     ]
 
     check_if_cuda_home_none("flash_attn")
