@@ -821,6 +821,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     bool const is_varlen = is_varlen_q || is_varlen_k || seqused_q_.has_value() || seqused_k_.has_value() || leftpad_k_.has_value();
     #ifdef FLASHATTENTION_DISABLE_VARLEN
         TORCH_CHECK(!is_varlen, "This flash attention build does not support varlen.");
+    #elif defined(FLASHATTENTION_DISABLE_FIXLEN)
+        TORCH_CHECK(is_varlen, "This flash attention build does not support fixlen.");
     #endif
 
     int const alignment = q_type == torch::kFloat8_e4m3fn ? 16 : 8;
@@ -1280,6 +1282,8 @@ std::vector<at::Tensor> mha_bwd(
     bool const is_varlen = is_varlen_q || is_varlen_k || seqused_q_.has_value() || seqused_k_.has_value();
     #ifdef FLASHATTENTION_DISABLE_VARLEN
         TORCH_CHECK(!is_varlen, "This flash attention build does not support varlen.");
+    #elif defined(FLASHATTENTION_DISABLE_FIXLEN)
+        TORCH_CHECK(is_varlen, "This flash attention build does not support fixlen.");
     #endif
 
     auto const sizes = q.sizes();

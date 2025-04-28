@@ -54,6 +54,7 @@ DISABLE_PACKGQA = os.getenv("FLASH_ATTENTION_DISABLE_PACKGQA", "FALSE") == "TRUE
 DISABLE_FP16 = os.getenv("FLASH_ATTENTION_DISABLE_FP16", "FALSE") == "TRUE"
 DISABLE_FP8 = os.getenv("FLASH_ATTENTION_DISABLE_FP8", "FALSE") == "TRUE"
 DISABLE_VARLEN = os.getenv("FLASH_ATTENTION_DISABLE_VARLEN", "FALSE") == "TRUE"
+DISABLE_FIXLEN = os.getenv("FLASH_ATTENTION_DISABLE_FIXLEN", "FALSE") == "TRUE"
 DISABLE_CLUSTER = os.getenv("FLASH_ATTENTION_DISABLE_CLUSTER", "FALSE") == "TRUE"
 DISABLE_HDIM64 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM64", "FALSE") == "TRUE"
 DISABLE_HDIM96 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM96", "FALSE") == "TRUE"
@@ -460,6 +461,7 @@ if not SKIP_CUDA_BUILD:
         + (["-DFLASHATTENTION_DISABLE_FP16"] if DISABLE_FP16 else [])
         + (["-DFLASHATTENTION_DISABLE_FP8"] if DISABLE_FP8 else [])
         + (["-DFLASHATTENTION_DISABLE_VARLEN"] if DISABLE_VARLEN else [])
+        + (["-DFLASHATTENTION_DISABLE_FIXLEN"] if DISABLE_FIXLEN else [])
         + (["-DFLASHATTENTION_DISABLE_CLUSTER"] if DISABLE_CLUSTER else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM64"] if DISABLE_HDIM64 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM96"] if DISABLE_HDIM96 else [])
@@ -542,8 +544,8 @@ if not SKIP_CUDA_BUILD:
             name="flash_attn_3_cuda",
             sources=sources,
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"] + feature_args,
-                "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
+                "cxx": ["-O3", "-std=c++17"] + feature_args + ["-Wno-deprecated-declarations"],
+                "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args + ["-Wno-deprecated-declarations"],
             },
             include_dirs=include_dirs,
         )

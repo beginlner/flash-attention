@@ -114,6 +114,12 @@
     constexpr static bool CONST_NAME = false;                                                    \
     return __VA_ARGS__();                                                                        \
   }()
+#elif defined(FLASHATTENTION_DISABLE_FIXLEN)
+#define VARLEN_SWITCH(COND, CONST_NAME, ...)                                                   \
+[&] {                                                                                          \
+  constexpr static bool CONST_NAME = true;                                                     \
+  return __VA_ARGS__();                                                                        \
+}()
 #else
   #define VARLEN_SWITCH BOOL_SWITCH
 #endif
