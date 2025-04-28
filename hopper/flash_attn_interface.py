@@ -12,6 +12,11 @@ import flash_attn_3_cuda
 # isort: on
 
 
+# Legacy interface
+_flash_attn_varlen_forward = None
+_flash_attn_varlen_backward = None
+
+
 def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
