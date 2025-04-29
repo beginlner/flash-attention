@@ -1,5 +1,7 @@
 *.ncu-rep
 .DS_store
+compile_commands.json
+.cache
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
