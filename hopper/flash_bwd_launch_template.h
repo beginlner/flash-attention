@@ -403,8 +403,8 @@ void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
                 //     D5(false) \
                 //     D5(true)
                 // D6
-                run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 2, 1, 2, 1, false, 128>(params, stream);
-                // run_mha_bwd_dispatch<Arch, T, 64, 128, 192, Is_causal, Is_local, Has_softcap, 1, 1, true, false, false, 2, 1, 2, 1, false, 128>(params, stream);
+                // run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 2, 1, 2, 1, false, 128>(params, stream);
+                run_mha_bwd_dispatch<Arch, T, 64, 128, 192, Is_causal, Is_local, Has_softcap, 1, 1, true, false, false, 2, 1, 2, 1, false, 128>(params, stream);
                 // run_mha_bwd_dispatch<Arch, T, 64, 128, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 2, 1, 2, 1, false, 128>(params, stream);
                 // run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 3, 1, 3, 1, false, 128>(params, stream);
             } else {

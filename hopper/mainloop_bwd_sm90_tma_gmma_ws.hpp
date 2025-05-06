@@ -860,7 +860,7 @@ struct CollectiveMainloopBwdSm90 {
             cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
         }
 
-        auto bwd_step = [&](int m_block, auto mask_fn) {
+        auto bwd_step_0 = [&](int m_block, auto mask_fn) {
             Tensor tSrS = partition_fragment_C(tiled_mma_S, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
             consumer_wait(pipeline_q, smem_pipe_read);
             flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_S, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
@@ -1028,6 +1028,132 @@ struct CollectiveMainloopBwdSm90 {
             ++smem_pipe_read;
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
         };
+
+        auto bwd_step_1 = [&](int m_block, auto mask_fn) {
+            if (!(Mma_dKV_is_RS && !Slice_dQKV_Mma)) { return; }  // To prevent compilation
+
+            consumer_wait(pipeline_q, smem_pipe_read);
+
+            Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+            if constexpr (!ShuffleLSE) {
+                cute::copy(tLSEsLSE(_, smem_pipe_read.index()), tLSErLSE);
+            } else {
+                #pragma unroll
+                for (int i = 0; i < kStatsPerThread; ++i) {
+                    // It's ok to read OOB, since we made sure sLSE is large enough and we won't use the OOB values
+                    tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8, smem_pipe_read.index());
+                }
+            }
+
+            Tensor tSrS = partition_fragment_C(tiled_mma_S, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/SdP_swapAB>(tiled_mma_S, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
+
+            if constexpr (Has_softcap) { flash::apply_softcap(tSrS, params.softcap_val); }
+            // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+            Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
+            // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
+            auto dtanh = [&] { if constexpr (Has_softcap) return flash::calculate_dtanh(scores); else return nullptr; }();
+            mask_fn(tSrS, m_block);
+            #pragma unroll
+            for (int mi = 0; mi < size<0>(scores); ++mi) {
+                float const lse_scaled = [&] {
+                    if constexpr (!ShuffleLSE) return tLSErLSE(mi);
+                    else return __shfl_sync(0xffffffff, tLSErLSE(mi / 8), (mi % 8) * 4 + (thread_idx % 4));
+                }();
+                #pragma unroll
+                for (int ni = 0; ni < size<1>(scores); ++ni) {
+                    scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
+                }
+            }
+            // Convert scores from fp32 to fp16/bf16
+            Tensor rP = make_tensor_like<Element>(tSrS);
+            flash::convert_type_out(tSrS, rP);
+
+            PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do);
+            consumer_wait(pipeline_do, smem_pipe_read_do_cur);
+
+            Tensor tdVrP = make_tensor(rP.data(), convert_layout_acc_Aregs<TiledMmadV>(tSrS.layout()));
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_dV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
+
+            Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
+            if constexpr (!ShuffledPsum) {
+                cute::copy(tLSEsdPsum(_, smem_pipe_read_do_cur.index()), tLSErdPsum);
+            } else {
+                #pragma unroll
+                for (int i = 0; i < kStatsPerThread; ++i) {
+                    tLSErdPsum(i) = tLSEsdPsum((thread_idx % 32) / 4 + i * 8, smem_pipe_read_do_cur.index());
+                }
+            }
+
+            Tensor tdPrdP = partition_fragment_C(tiled_mma_dP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
+
+            pipeline_do.consumer_release(smem_pipe_read_do_cur);  // release dO
+
+            // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
+            Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
+            #pragma unroll
+            for (int mi = 0; mi < size<0>(dS); ++mi) {
+                float const dP_sum_cur = [&] {
+                    if constexpr (!ShuffledPsum) return tLSErdPsum(mi);
+                    else return __shfl_sync(0xffffffff, tLSErdPsum(mi / 8), (mi % 8) * 4 + (thread_idx % 4));
+                }();
+                #pragma unroll
+                for (int ni = 0; ni < size<1>(dS); ++ni) {
+                    dS(mi, ni) = scores(mi, ni) * (dS(mi, ni) - dP_sum_cur);
+                    if constexpr (Has_softcap) { dS(mi, ni) *= dtanh(mi, ni); }
+                }
+            }
+
+            Tensor rdS = make_tensor_like<Element>(tdPrdP);
+            flash::convert_type_out(tdPrdP, rdS);
+
+            Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadK>(tdPrdP.layout()));
+            flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_dK, tdKrdS, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
+
+            pipeline_q.consumer_release(smem_pipe_read);   // release Q
+
+            // If there's double buffering on dS, we don't need to sync here.
+            // Otherwise we might have WG1 writing to dS before WG2 is done reading from it during MmadQ.
+            // But because both WGs have to sync at the end of the loop and double buffering,
+            // this race condition is not possible.
+            // This sync is to ensure (1) P is written in case of !Mma_dKV_is_RS and
+            // (2) dS is already read by the Mma in the previous iteration in case of Mma_dKV_is_RS.
+            if constexpr (kStages_dS == 1) {
+                cutlass::arch::fence_view_async_shared();
+                cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+            }
+            // For hdim 64, It's faster to write to smem_dS first before the dV gemm
+            Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS);     // ((Atom,AtomNum), MMA_N, MMA_N)
+            cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return<kStages_dS==1>(_0{}, smem_pipe_read.index())));
+            // SMEM fence to make sure sdS is written before it's read by WGMMA
+            cutlass::arch::fence_view_async_shared();
+            cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
+            Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
+            Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS==1>(_0{}, smem_pipe_read.index()));
+            flash::gemm</*zero_init=*/true, /*wg_wait=*/0, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
+
+            if constexpr (dQacc_use_TMA) {
+                int const warp_group_idx = flash::canonical_warp_group_idx_nosync() - 1;
+                cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warp_group_idx /*id*/);  // sdQ full, to be written to gmem
+                Tensor taccdQrdQ = r2s_thr_copy_dQaccum.retile_S(tdQrdQ);
+                cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
+                cutlass::arch::fence_view_async_shared();
+                cutlass::arch::NamedBarrier::arrive(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warp_group_idx /*id*/);  // sdQ full, to be written to gmem
+            } else {
+                // We can reuse r2s_thr_copy_dQaccum for this partitioning
+                Tensor tdQrdQ_atomic = recast<float4>(r2s_thr_copy_dQaccum.retile_S(tdQrdQ));
+                Tensor tdQgdQaccum_atomic = recast<float4>(tdQgdQaccum(_, _, _, m_block));
+                static_assert(CUTE_STATIC_V(size(tdQrdQ_atomic)) == CUTE_STATIC_V(size(tdQgdQaccum_atomic)));
+                #pragma unroll
+                for (int i = 0; i < size(tdQrdQ_atomic); ++i) { atomicAdd(&tdQgdQaccum_atomic(i), tdQrdQ_atomic(i)); }
+            }
+
+            ++smem_pipe_read;
+            if constexpr (!Q_dO_same_stages) { ++smem_pipe_read_do; }
+        };
+
+        auto bwd_step = cute::conditional_return<kHeadDim == 192 && kHeadDimV == 128 && Mma_dKV_is_RS && !Slice_dQKV_Mma>(bwd_step_1, bwd_step_0);
 
         // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
         // this helps quite a bit to not have to do causal masking for most of the iterations.
