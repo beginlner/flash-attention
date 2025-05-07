@@ -95,10 +95,15 @@ def test_flash_attention():
 
     def flash_attn(provider="FA3"):
         q1.grad = k1.grad = v1.grad = None
+        kwargs = {}
+        if causal:
+            kwargs["causal"] = causal
+        if window != 0:
+            kwargs["window_size"] = window_size
         if provider == "FA3":
-            return flash_attn_func_hopper(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), causal=causal, window_size=window_size)[0].flatten(0, 1)
+            return flash_attn_func_hopper(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), **kwargs)[0].flatten(0, 1)
         elif provider == "FA3 varlen":
-            return flash_attn_varlen_func_hopper(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, causal=causal, window_size=window_size)[0]
+            return flash_attn_varlen_func_hopper(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, **kwargs)[0]
         else:
             raise ValueError
 
