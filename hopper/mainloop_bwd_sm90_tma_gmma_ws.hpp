@@ -861,6 +861,8 @@ struct CollectiveMainloopBwdSm90 {
         }
 
         auto bwd_step_0 = [&](int m_block, auto mask_fn) {
+            if (kHeadDim == 192 && kHeadDimV == 128 && Mma_dKV_is_RS && !Slice_dQKV_Mma) { return; }  // To prevent compilation
+
             Tensor tSrS = partition_fragment_C(tiled_mma_S, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
             consumer_wait(pipeline_q, smem_pipe_read);
             flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_S, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
@@ -1030,7 +1032,7 @@ struct CollectiveMainloopBwdSm90 {
         };
 
         auto bwd_step_1 = [&](int m_block, auto mask_fn) {
-            if (!(Mma_dKV_is_RS && !Slice_dQKV_Mma)) { return; }  // To prevent compilation
+            if (!(kHeadDim == 192 && kHeadDimV == 128 && Mma_dKV_is_RS && !Slice_dQKV_Mma)) { return; }  // To prevent compilation
 
             consumer_wait(pipeline_q, smem_pipe_read);
 
