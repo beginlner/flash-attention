@@ -12,9 +12,93 @@ import flash_attn_3_cuda
 # isort: on
 
 
-# Legacy interface
-_flash_attn_varlen_forward = None
-_flash_attn_varlen_backward = None
+def _flash_attn_varlen_forward(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    causal,
+    window_size=(-1, -1),
+    softcap=0.0,
+    num_splits=1,
+    pack_gqa=None,
+    sm_margin=0,
+):
+    out, softmax_lse, *rest = _flash_attn_forward(
+        q,
+        k,
+        v,
+        None, None,  # k_new, v_new
+        None,  # qv
+        None,  # out
+        cu_seqlens_q,
+        cu_seqlens_k,
+        None,  # cu_seqlens_k_new
+        None, None,  # seqused_q, seqused_k
+        max_seqlen_q,
+        max_seqlen_k,
+        None, None, None,  # page_table, kv_batch_idx, leftpad_k,
+        None, None, None,  # rotary_cos/sin, seqlens_rotary
+        None, None, None,  # q_descale, k_descale, v_descale
+        softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        attention_chunk=0,
+        softcap=softcap,
+        num_splits=num_splits,
+        pack_gqa=pack_gqa,
+        sm_margin=sm_margin,
+    )
+    return out, q, k, v, out, softmax_lse
+
+
+def _flash_attn_varlen_backward(
+    dout,
+    q,
+    k,
+    v,
+    out,
+    softmax_lse,
+    dq,
+    dk,
+    dv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    causal,
+    deterministic=False,
+    window_size=(-1, -1),
+    softcap=0.0,
+    sm_margin=0,
+):
+    _flash_attn_backward(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        None, None,  # seqused_q, seqused_k
+        max_seqlen_q,
+        max_seqlen_k,
+        dq,
+        dk,
+        dv,
+        softmax_scale,
+        causal,
+        window_size,
+        softcap,
+        deterministic,
+        sm_margin,
+    )
 
 
 def maybe_contiguous(x):
