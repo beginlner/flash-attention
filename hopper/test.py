@@ -14,6 +14,7 @@ dv = 128
 causal = True
 window = 0
 has_bwd = True
+deterministic = False
 dtype = torch.bfloat16
 default_dtype = torch.bfloat16
 torch.set_default_dtype(default_dtype)
@@ -95,6 +96,7 @@ def test_flash_attention():
     def flash_attn(provider="FA3"):
         q1.grad = k1.grad = v1.grad = None
         kwargs = {}
+        kwargs["deterministic"] = deterministic
         if causal:
             kwargs["causal"] = causal
         if window != 0:
