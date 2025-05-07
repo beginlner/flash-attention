@@ -372,7 +372,7 @@ def download_and_copy(name, src_func, dst_path, version, url_func):
 
 
 def nvcc_threads_args():
-    nvcc_threads = os.getenv("NVCC_THREADS") or "2"
+    nvcc_threads = os.getenv("NVCC_THREADS") or "32"
     return ["--threads", nvcc_threads]
 
 
