@@ -1324,7 +1324,7 @@ std::vector<at::Tensor> mha_bwd(
     int const kBlockM = arch >= 90 ? kBlockM_sm90 : (arch == 86 || arch == 89 ? kBlockM_sm86 : kBlockM_sm80);
     int const kBlockN_sm90 = head_size_rounded <= 128
         ? 128
-        : (head_size_rounded <= 192 ? 96 : 80);
+        : (head_size_rounded <= 192 ? (head_size_v_rounded <= 128 ? 128 : 96) : 80);
     int const kBlockN_sm80 = head_size_rounded <= 128
         ? 128
         : (head_size_rounded <= 192 ? 80 : 64);
@@ -1478,14 +1478,15 @@ std::vector<at::Tensor> mha_bwd(
     // auto tile_count_semaphore = (params.is_causal || params.is_local) ? torch::zeros({1}, opts.dtype(torch::kInt32)) : torch::empty({1}, opts.dtype(torch::kInt32));
     // params.tile_count_semaphore = tile_count_semaphore.data_ptr<int>();
     // Will be zero'ed out in the backward preprocess kernel
+    at::Tensor dq_semaphore, dk_semaphore, dv_semaphore;
     if (params.deterministic) {
-        at::Tensor dq_semaphore = torch::empty({(seqlen_q + kBlockM - 1) / kBlockM, batch_size, num_heads}, opts.dtype(torch::kInt32));
+        dq_semaphore = torch::empty({(seqlen_q + kBlockM - 1) / kBlockM, batch_size, num_heads}, opts.dtype(torch::kInt32));
         params.dq_semaphore = dq_semaphore.data_ptr<int>();
     }
     if (num_heads_k != num_heads && params.deterministic) {
         // TODO: do we need to zero them out?
-        at::Tensor dk_semaphore = torch::zeros({(seqlen_k + kBlockN - 1) / kBlockN, batch_size, num_heads_k}, opts.dtype(torch::kInt32));
-        at::Tensor dv_semaphore = torch::zeros({(seqlen_k + kBlockN - 1) / kBlockN, batch_size, num_heads_k}, opts.dtype(torch::kInt32));
+        dk_semaphore = torch::zeros({(seqlen_k + kBlockN - 1) / kBlockN, batch_size, num_heads_k}, opts.dtype(torch::kInt32));
+        dv_semaphore = torch::zeros({(seqlen_k + kBlockN - 1) / kBlockN, batch_size, num_heads_k}, opts.dtype(torch::kInt32));
         params.dk_semaphore = dk_semaphore.data_ptr<int>();
         params.dv_semaphore = dv_semaphore.data_ptr<int>();
     }
