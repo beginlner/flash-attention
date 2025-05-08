@@ -167,6 +167,7 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
             }
         }(),
         params.h,
+        params.b,
         params.dk_semaphore,
         params.dv_semaphore,
         params.cu_seqlens_k,
