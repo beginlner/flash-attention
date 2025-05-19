@@ -128,10 +128,11 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         params.seqused_q, params.seqused_k,
         params.leftpad_k, params.seqlens_rotary
     };
+    constexpr bool Use_Varlen_TMA_O = CollectiveEpilogue::Use_Varlen_TMA_O;
     typename CollectiveEpilogue::Arguments epilogue_args {
-        static_cast<ElementOut*>(params.o_ptr),
-        {seqlen_q, params.dv, params.h, batch_q, params.num_splits},  // shape_O
-        {params.o_row_stride, _1{}, params.o_head_stride, !is_varlen_q ? params.o_batch_stride : 0, 0}, // stride_O
+        !Use_Varlen_TMA_O ? static_cast<ElementOut*>(params.o_ptr) : static_cast<ElementOut*>(params.o_ptr) - params.seqlen_q * params.o_row_stride,
+        {!Use_Varlen_TMA_O ? seqlen_q : params.seqlen_q, params.dv, params.h, !Use_Varlen_TMA_O ? batch_q : seqlen_q + params.seqlen_q, params.num_splits},  // shape_O
+        {params.o_row_stride, _1{}, params.o_head_stride, !Use_Varlen_TMA_O ? (!is_varlen_q ? params.o_batch_stride : 0) : params.o_row_stride, 0}, // stride_O
         static_cast<float*>(params.oaccum_ptr),
         {params.oaccum_row_stride, _1{}, params.oaccum_head_stride, !is_varlen_q ? params.oaccum_batch_stride : 0, params.oaccum_split_stride}, // stride_O_partial
         static_cast<float*>(params.softmax_lse_ptr),

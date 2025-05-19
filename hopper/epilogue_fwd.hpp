@@ -6,6 +6,7 @@
 
 #include <cutlass/cutlass.h>
 #include <cutlass/fast_math.h>  // For FastDivMod
+#include "cute/layout.hpp"
 #include "cute/tensor.hpp"
 
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
@@ -34,7 +35,8 @@ struct CollectiveEpilogueFwd {
     static constexpr bool PackGQA = PackGQA_;
     static constexpr bool Split = Split_;
     static constexpr bool Use_smem = !(Split && !Varlen);
-    static constexpr bool Use_TMA_O = ArchTag::kMinComputeCapability >= 90 && !Varlen && !Split && !PackGQA;
+    static constexpr bool Use_TMA_O = ArchTag::kMinComputeCapability >= 90 && !Split && !PackGQA;
+    static constexpr bool Use_Varlen_TMA_O = Use_TMA_O && Varlen;
 
     static_assert(ArchTag::kMinComputeCapability >= 80);
     static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
@@ -308,7 +310,13 @@ struct CollectiveEpilogueFwd {
 
         // Step 3: Write O from smem -> gmem
         if constexpr (Use_TMA_O) {
-            Tensor mO = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh, bidb, split_idx);
+            Tensor mO = [&] {
+                if constexpr (!Use_Varlen_TMA_O) {
+                    return params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh, bidb, split_idx);
+                } else {
+                    return domain_offset(make_coord(get<0>(params.shape_O) - seqlen_o, _0{}), params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh, offset_o + seqlen_o, split_idx));
+                }
+            }();
             Tensor gO = local_tile(mO, select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));  // (M, K)
             auto block_tma_O = params.tma_store_O.get_slice(_0{});
             Tensor tOgO = block_tma_O.partition_D(gO);  // (TMA, TMA_M, TMA_K)
