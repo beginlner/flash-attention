@@ -25,3 +25,5 @@ var/
 
 # Dev
 venv
+.cache
+compile_commands.json
