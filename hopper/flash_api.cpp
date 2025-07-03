@@ -218,6 +218,9 @@ void set_params_dgrad(Flash_bwd_params &params,
                       bool deterministic=false,
                       int const sm_margin=0) {
 
+    // Reset the parameters
+    params = {};
+
     set_params_fprop(params,
                      b, seqlen_q, seqlen_k, seqlen_q_rounded, seqlen_k_rounded, h, h_k, d, d_rounded,
                      q, k, v, out,
