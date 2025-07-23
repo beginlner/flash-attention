@@ -43,6 +43,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *seqused_k,
                       void *p_d,
                       void *softmax_lse_d,
+                      bool return_max_logits,
+                      void *softmax_max_logits,
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,
@@ -89,6 +91,10 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
+
+    // Max logits
+    params.return_max_logits = return_max_logits;
+    params.softmax_max_logits = softmax_max_logits;
 
     // Set the dimensions.
     params.b = b;
@@ -182,6 +188,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                      nullptr,
                      nullptr,
                      softmax_lse_d,
+                     false,
+                     nullptr,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -450,6 +458,8 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                      /*seqused_k=*/nullptr,
                      return_softmax ? p.data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
+                     false,
+                     nullptr,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -498,7 +508,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
     return {out, q_padded, k_padded, v_padded, out_padded, softmax_lse, p, rng_state};
 }
 
-std::vector<at::Tensor>
+std::vector<c10::optional<at::Tensor>>
 mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
                const at::Tensor &k,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &v,  // total_k x num_heads_k x head_size_v, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
@@ -517,6 +527,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                int window_size_left,
                int window_size_right,
                const bool return_softmax,
+               const bool return_max_logits,
                c10::optional<at::Generator> gen_) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -655,6 +666,12 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     auto opts = q.options();
 
     auto softmax_lse = torch::empty({batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
+    c10::optional<at::Tensor> max_logits;
+    if(return_max_logits) {
+        max_logits = torch::empty({batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
+    } else {
+        max_logits = c10::nullopt;
+    }
     at::Tensor p;
     // Only return softmax if there's dropout to reduce compilation time
     if (return_softmax) {
@@ -665,6 +682,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     if (zero_tensors) {
         out.zero_();
         softmax_lse.fill_(-std::numeric_limits<float>::infinity());
+        if(return_max_logits) {
+            max_logits.value().fill_(-std::numeric_limits<float>::infinity());
+        }
         if (return_softmax) {p.zero_();}
     }
 
@@ -681,6 +701,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      seqused_k.has_value() ? seqused_k.value().data_ptr() : nullptr,
                      return_softmax ? p.data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
+                     return_max_logits,
+                     return_max_logits ? max_logits.value().data_ptr() : nullptr,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -740,7 +762,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * max_seqlen_q, 1});
     }
 
-    return {out, q_padded, k_padded, v_padded, out, softmax_lse, p, rng_state};
+    return {out, q_padded, k_padded, v_padded, out, softmax_lse, max_logits, p, rng_state};
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
@@ -1363,6 +1385,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                      /*seqused_k=*/nullptr,
                      /*p_ptr=*/nullptr,
                      softmax_lse.data_ptr(),
+                     false,
+                     nullptr,
                      /*p_dropout=*/0.f,
                      softmax_scale,
                      window_size_left,

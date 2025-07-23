@@ -24,7 +24,7 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, typename Params>
+template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, bool ReturnMaxLogits, typename Params>
 inline __device__ void compute_attn_1rowblock(const Params &params, const int bidb, const int bidh, const int m_block) {
 
     using Element = typename Kernel_traits::Element;
@@ -407,6 +407,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     // Epilogue
 
     Tensor lse = softmax.template normalize_softmax_lse<Is_dropout>(acc_o, params.scale_softmax, params.rp_dropout);
+    Tensor max_logits = softmax.fetch_row_max();
 
     // Convert acc_o from fp32 to fp16/bf16
     Tensor rO = flash::convert_type<Element>(acc_o);
@@ -430,6 +431,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                             make_stride(params.o_row_stride, _1{}));
     Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
                               Shape<Int<kBlockM>>{}, Stride<_1>{});
+    Tensor gMaxLogits = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_max_logits) + row_offset_lse),
+                              Shape<Int<kBlockM>>{}, Stride<_1>{});
 
     typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
@@ -451,7 +454,11 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         #pragma unroll
         for (int mi = 0; mi < size(lse); ++mi) {
             const int row = get<0>(taccOcO_row(mi));
-            if (row < binfo.actual_seqlen_q - m_block * kBlockM) { gLSE(row) = lse(mi); }
+            if (row < binfo.actual_seqlen_q - m_block * kBlockM) {
+                gLSE(row) = lse(mi);
+                if constexpr (ReturnMaxLogits)
+                    gMaxLogits(row) = max_logits(mi) * params.scale_softmax;
+            }
         }
     }
 
@@ -1140,7 +1147,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, typename Params>
+template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, bool ReturnMaxLogits, typename Params>
 inline __device__ void compute_attn(const Params &params) {
     const int m_block = blockIdx.x;
     // The block index for the batch.
@@ -1156,7 +1163,7 @@ inline __device__ void compute_attn(const Params &params) {
     // the attention matrix. This way, as long as we have the batch, head, and the location of
     // the 16 x 32 block within the attention matrix, we can generate the exact same dropout pattern.
 
-    flash::compute_attn_1rowblock<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Return_softmax>(params, bidb, bidh, m_block);
+    flash::compute_attn_1rowblock<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Return_softmax, ReturnMaxLogits>(params, bidb, bidh, m_block);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
