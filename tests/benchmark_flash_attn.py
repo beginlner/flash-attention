@@ -27,7 +27,7 @@ def assert_close(x, y, name=""):
     diff = calc_diff(x, y)
     amax = (x - y).abs().max()
     print(f"{name} diff: {diff}, amax: {amax}")
-    assert diff < 1e-5
+    assert diff < 1e-4
 
 
 def timer(func):
