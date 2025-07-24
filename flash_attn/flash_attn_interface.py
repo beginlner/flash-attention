@@ -457,7 +457,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
-            return_max_logits=False,
+            return_max_logits=return_max_logits,
             block_table=None,
         )
         if return_max_logits:
