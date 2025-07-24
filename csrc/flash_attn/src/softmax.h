@@ -198,6 +198,10 @@ struct Softmax {
         }
         return lse;
     };
+
+    __forceinline__ __device__ TensorT fetch_row_max() {
+        return row_max;
+    };
 };
 
 }  // namespace flash
