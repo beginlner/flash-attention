@@ -508,7 +508,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
     return {out, q_padded, k_padded, v_padded, out_padded, softmax_lse, p, rng_state};
 }
 
-std::vector<c10::optional<at::Tensor>>
+std::vector<at::Tensor>
 mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
                const at::Tensor &k,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &v,  // total_k x num_heads_k x head_size_v, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
@@ -762,7 +762,11 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * max_seqlen_q, 1});
     }
 
-    return {out, q_padded, k_padded, v_padded, out, softmax_lse, max_logits, p, rng_state};
+    if(return_max_logits) {
+        return {out, q_padded, k_padded, v_padded, out, softmax_lse, max_logits.value(), p, rng_state};
+    } else {
+        return {out, q_padded, k_padded, v_padded, out, softmax_lse, p, rng_state};
+    }
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {

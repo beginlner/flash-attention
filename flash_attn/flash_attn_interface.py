@@ -84,7 +84,9 @@ def _flash_attn_varlen_forward(
 ):
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = flash_attn_cuda.varlen_fwd(
+
+    # (out, q, k, v, out_padded, softmax_lse, (maybe)max_logits, S_dmask, rng_state) = output_tensors
+    output_tensors = flash_attn_cuda.varlen_fwd(
         q,
         k,
         v,
@@ -108,7 +110,7 @@ def _flash_attn_varlen_forward(
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
-    return out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state
+    return output_tensors
 
 
 def _flash_attn_backward(
@@ -289,7 +291,7 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = _flash_attn_varlen_forward(
+        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
             qkv[:, 0],
             qkv[:, 1],
             qkv[:, 2],
@@ -432,7 +434,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = _flash_attn_varlen_forward(
+        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
             q,
             kv[:, 0],
             kv[:, 1],
@@ -585,7 +587,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
         ctx.qk_dim = q.shape[-1]
         ctx.v_dim = v.shape[-1]
-        out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = _flash_attn_varlen_forward(
+        output_tensors = _flash_attn_varlen_forward(
             q,
             k,
             v,
@@ -602,6 +604,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             return_max_logits=return_max_logits,
             block_table=block_table,
         )
+        if return_max_logits:
+            out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = output_tensors
+        else:
+            out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = output_tensors
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
