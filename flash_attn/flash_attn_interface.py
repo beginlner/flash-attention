@@ -79,11 +79,14 @@ def _flash_attn_varlen_forward(
     window_size,
     alibi_slopes,
     return_softmax,
+    return_max_logits,
     block_table=None,
 ):
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.varlen_fwd(
+
+    # (out, q, k, v, out_padded, softmax_lse, (maybe)max_logits, S_dmask, rng_state) = output_tensors
+    output_tensors = flash_attn_cuda.varlen_fwd(
         q,
         k,
         v,
@@ -102,11 +105,12 @@ def _flash_attn_varlen_forward(
         window_size[0],
         window_size[1],
         return_softmax,
+        return_max_logits,
         None,
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
-    return out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state
+    return output_tensors
 
 
 def _flash_attn_backward(
@@ -284,10 +288,11 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        return_max_logits,
     ):
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
+        output_tensors = _flash_attn_varlen_forward(
             qkv[:, 0],
             qkv[:, 1],
             qkv[:, 2],
@@ -301,8 +306,13 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            return_max_logits=return_max_logits,
             block_table=None,
         )
+        if return_max_logits:
+            out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = output_tensors
+        else:
+            out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = output_tensors
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens, rng_state)
         ctx.dropout_p = dropout_p
         ctx.max_seqlen = max_seqlen
@@ -311,7 +321,10 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
-        return out if not return_softmax else (out, softmax_lse, S_dmask)
+        if not return_max_logits:
+            return out if not return_softmax else (out, softmax_lse, S_dmask)
+        else:
+            return out, max_logits if not return_softmax else (out, softmax_lse, S_dmask, max_logits)
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -341,7 +354,7 @@ class FlashAttnVarlenQKVPackedFunc(torch.autograd.Function):
             rng_state=rng_state,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
-        return dqkv, None, None, None, None, None, None, None, None, None
+        return dqkv, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnKVPackedFunc(torch.autograd.Function):
@@ -426,10 +439,11 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        return_max_logits,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
+        output_tensors = _flash_attn_varlen_forward(
             q,
             kv[:, 0],
             kv[:, 1],
@@ -443,8 +457,13 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            return_max_logits=return_max_logits,
             block_table=None,
         )
+        if return_max_logits:
+            out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = output_tensors
+        else:
+            out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = output_tensors
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
@@ -456,7 +475,10 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
-        return out if not return_softmax else (out, softmax_lse, S_dmask)
+        if not return_max_logits:
+            return out if not return_softmax else (out, softmax_lse, S_dmask)
+        else:
+            return out, max_logits if not return_softmax else (out, softmax_lse, S_dmask, max_logits)
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -488,7 +510,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -574,13 +596,14 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        return_max_logits,
         block_table,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         ctx.qk_dim = q.shape[-1]
         ctx.v_dim = v.shape[-1]
-        out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_varlen_forward(
+        output_tensors = _flash_attn_varlen_forward(
             q,
             k,
             v,
@@ -594,8 +617,13 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            return_max_logits=return_max_logits,
             block_table=block_table,
         )
+        if return_max_logits:
+            out, q, k, v, out_padded, softmax_lse, max_logits, S_dmask, rng_state = output_tensors
+        else:
+            out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = output_tensors
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
         )
@@ -607,7 +635,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
-        return out if not return_softmax else (out, softmax_lse, S_dmask)
+        if not return_max_logits:
+            return out if not return_softmax else (out, softmax_lse, S_dmask)
+        else:
+            return out, max_logits if not return_softmax else (out, softmax_lse, S_dmask, max_logits)
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -638,7 +669,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         dq = dq[..., : ctx.qk_dim]  # We could have padded the head dimension
         dk = dk[..., : ctx.qk_dim]
         dv = dv[..., : ctx.v_dim]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def flash_attn_qkvpacked_func(
@@ -855,6 +886,7 @@ def flash_attn_varlen_qkvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    return_max_logits=False,
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -903,6 +935,7 @@ def flash_attn_varlen_qkvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        return_max_logits,
     )
 
 
@@ -920,6 +953,7 @@ def flash_attn_varlen_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    return_max_logits=False,
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -991,6 +1025,7 @@ def flash_attn_varlen_kvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        return_max_logits,
     )
 
 
@@ -1009,6 +1044,7 @@ def flash_attn_varlen_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    return_max_logits=False,
     block_table=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
@@ -1056,6 +1092,7 @@ def flash_attn_varlen_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        return_max_logits: bool. Whether to return max_logits.
     Return:
         out: (total, nheads, headdim).
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
@@ -1080,6 +1117,7 @@ def flash_attn_varlen_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        return_max_logits,
         block_table,
     )
 

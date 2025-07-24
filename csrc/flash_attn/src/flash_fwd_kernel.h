@@ -407,6 +407,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     // Epilogue
 
     Tensor lse = softmax.template normalize_softmax_lse<Is_dropout>(acc_o, params.scale_softmax, params.rp_dropout);
+    Tensor max_logits = softmax.fetch_row_max();
 
     // Convert acc_o from fp32 to fp16/bf16
     Tensor rO = flash::convert_type<Element>(acc_o);
@@ -430,6 +431,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                             make_stride(params.o_row_stride, _1{}));
     Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
                               Shape<Int<kBlockM>>{}, Stride<_1>{});
+    Tensor gMaxLogits = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_max_logits) + row_offset_lse),
+                              Shape<Int<kBlockM>>{}, Stride<_1>{});
 
     typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
@@ -451,7 +454,11 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         #pragma unroll
         for (int mi = 0; mi < size(lse); ++mi) {
             const int row = get<0>(taccOcO_row(mi));
-            if (row < binfo.actual_seqlen_q - m_block * kBlockM) { gLSE(row) = lse(mi); }
+            if (row < binfo.actual_seqlen_q - m_block * kBlockM) {
+                gLSE(row) = lse(mi);
+                if (params.return_max_logits)
+                    gMaxLogits(row) = max_logits(mi) * params.scale_softmax;
+            }
         }
     }
 
