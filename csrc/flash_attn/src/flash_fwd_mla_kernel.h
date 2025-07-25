@@ -927,8 +927,15 @@ void run_mha_fwd_splitkv_mha_128(Flash_fwd_mla_params &params, cudaStream_t stre
     FLASH_ASSERT(params.d == 128);
     FLASH_ASSERT(params.d_v == 128);
     FLASH_ASSERT(params.kvcache_quantization_type == 0);
-    using Kernel_traits = Flash_fwd_kernel_traits_mla<128, 64, 128, 4, T, 128, false>;
-    run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
+    if (params.page_block_size == 128) {
+        using Kernel_traits = Flash_fwd_kernel_traits_mla<128, 64, 128, 4, T, 128, false>;
+        run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
+    } else if (params.page_block_size == 64) {
+        using Kernel_traits = Flash_fwd_kernel_traits_mla<128, 64, 64, 4, T, 128, false>;
+        run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMHA<Kernel_traits>>(params, stream);
+    } else {
+        FLASH_ASSERT(false);
+    }
 }
 
 static constexpr int MaxBatchSize = 4096;
