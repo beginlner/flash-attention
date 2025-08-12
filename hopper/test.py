@@ -134,7 +134,6 @@ def test_flash_attention():
         assert_close(q1.grad, q2.grad, "dq")
         assert_close(k1.grad, k2.grad, "dk")
         assert_close(v1.grad, v2.grad, "dv")
-
     # timer(lambda: fn("FA3"), "FA3")
     timer(lambda: fn("FA3 varlen"), "FA3 varlen")
     # timer(lambda: fn("FA3"), "FA3")
