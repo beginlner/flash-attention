@@ -29,7 +29,7 @@ def _flash_attn_varlen_forward(
     sm_margin=0,
     return_max_logits=False,
 ):
-    out, softmax_lse, max_logits, *rest = _flash_attn_forward(
+    out_tuple = _flash_attn_forward(
         q,
         k,
         v,
@@ -55,7 +55,12 @@ def _flash_attn_varlen_forward(
         sm_margin=sm_margin,
         return_max_logits=return_max_logits,
     )
-    return out, q, k, v, out, softmax_lse, max_logits
+    if return_max_logits:
+        out, softmax_lse, max_logits, *rest = out_tuple
+        return out, q, k, v, out, softmax_lse, max_logits
+    else:
+        out, softmax_lse, *rest = out_tuple
+        return out, q, k, v, out, softmax_lse
 
 
 def _flash_attn_varlen_backward(
@@ -191,6 +196,7 @@ def _flash_attn_forward(
         num_splits,
         pack_gqa,
         sm_margin,
+        return_max_logits,
     )
     return out, softmax_lse, *rest
 
@@ -274,7 +280,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             num_heads_k = (qkv.shape[2] - num_heads_q) // 2
             assert num_heads_k * 2 + num_heads_q == qkv.shape[2]
             q, k, v = qkv.split([num_heads_q, num_heads_k, num_heads_k], dim=-2)
-        out, softmax_lse, max_logits, *rest = _flash_attn_forward(
+        out_tuple = _flash_attn_forward(
             q,
             k,
             v,
@@ -295,6 +301,10 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             sm_margin=sm_margin,
             return_max_logits=return_max_logits,
         )
+        if return_max_logits:
+            out, softmax_lse, max_logits, *rest = out_tuple
+        else:
+            out, softmax_lse, *rest = out_tuple
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
@@ -370,7 +380,7 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # out, q, k, v, out_padded, softmax_lse = _flash_attn_forward(
-        out, softmax_lse, max_logits, *rest = _flash_attn_forward(
+        out_tuple = _flash_attn_forward(
             q,
             k,
             v,
@@ -393,6 +403,10 @@ class FlashAttnFunc(torch.autograd.Function):
             sm_margin=sm_margin,
             return_max_logits=return_max_logits,
         )
+        if return_max_logits:
+            out, softmax_lse, max_logits, *rest = out_tuple
+        else:
+            out, softmax_lse, *rest = out_tuple
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
@@ -464,8 +478,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # out, q, k, v, out_padded, softmax_lse, max_logits = _flash_attn_varlen_forward(
-        out, softmax_lse, max_logits, *rest = _flash_attn_forward(
+        # out, q, k, v, out_padded, softmax_lse = _flash_attn_varlen_forward(
+        out_tuple = _flash_attn_forward(
             q,
             k,
             v,
@@ -492,6 +506,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             sm_margin=sm_margin,
             return_max_logits=return_max_logits,
         )
+        if return_max_logits:
+            out, softmax_lse, max_logits, *rest = out_tuple
+        else:
+            out, softmax_lse, *rest = out_tuple
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
         ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
         ctx.max_seqlen_q = max_seqlen_q
@@ -857,7 +875,7 @@ def flash_attn_with_kvcache(
             (k_cache.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
-    out, softmax_lse, max_logits, *rest = _flash_attn_forward(
+    out_tuple = _flash_attn_forward(
         q,
         k_cache,
         v_cache,
@@ -893,8 +911,10 @@ def flash_attn_with_kvcache(
     )
     # return (out, softmax_lse) if return_softmax_lse else out
     if return_max_logits:
+        out, softmax_lse, max_logits, *rest = out_tuple
         return (out, softmax_lse, max_logits, *rest) if return_softmax_lse else out, max_logits
     else:
+        out, softmax_lse, *rest = out_tuple
         return (out, softmax_lse, *rest) if return_softmax_lse else out
 
 

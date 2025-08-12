@@ -688,7 +688,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         std::optional<at::Tensor> &scheduler_metadata_,  // (b + 1)
         int num_splits,
         std::optional<bool> pack_gqa_,
-        int const sm_margin
+        int const sm_margin,
+        bool const return_max_logits
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -1165,11 +1166,14 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();
         softmax_lse.fill_(std::numeric_limits<float>::infinity());
-        max_logits.fill_(std::numeric_limits<float>::infinity());
+        if (return_max_logits) max_logits.fill_(std::numeric_limits<float>::infinity());
     }
 
     // return {out, softmax_lse};
-    return {out, softmax_lse, max_logits, out_accum, softmax_lse_accum};
+    if (return_max_logits)
+        return {out, softmax_lse, max_logits, out_accum, softmax_lse_accum};
+    else
+        return {out, softmax_lse, out_accum, softmax_lse_accum};
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
