@@ -127,6 +127,7 @@ struct CollectiveEpilogueFwd {
         ElementPartial* ptr_O_partial;
         StrideO const stride_O_partial;
         float* ptr_LSE;
+        float* ptr_max_logits;
         StrideLSE const stride_LSE;
         float* ptr_LSE_partial;
         StrideLSE const stride_LSE_partial;
@@ -146,6 +147,7 @@ struct CollectiveEpilogueFwd {
         StrideO const stride_O_partial;
         StrideOPacked const stride_O_partial_packed;
         float* ptr_LSE;
+        float* ptr_max_logits;
         StrideLSE const stride_LSE;
         ShapeLSEPacked const shape_LSE_packed;
         StrideLSEPacked const stride_LSE_packed;
@@ -197,7 +199,8 @@ struct CollectiveEpilogueFwd {
         );
         return {args.ptr_O, args.shape_O, args.stride_O, shape_O_packed, stride_O_packed,
                 args.ptr_O_partial, args.stride_O_partial, stride_O_partial_packed,
-                args.ptr_LSE, args.stride_LSE, shape_LSE_packed, stride_LSE_packed,
+                args.ptr_LSE, args.ptr_max_logits,
+                args.stride_LSE, shape_LSE_packed, stride_LSE_packed,
                 args.ptr_LSE_partial, args.stride_LSE_partial, stride_LSE_partial_packed,
                 cutlass::FastDivmod(qhead_per_khead),
                 tma_store_O, args.cu_seqlens, args.seqused};
@@ -211,11 +214,13 @@ struct CollectiveEpilogueFwd {
         }
     }
 
-    template <typename SharedStorage, typename FrgTensorO, typename FrgTensorLSE, typename TiledMma>
+    template <typename SharedStorage, typename FrgTensorO, typename FrgTensorSoftmaxRow, typename TiledMma>
     CUTLASS_DEVICE void
     store(Params const& params,
           FrgTensorO& tOrO,
-          FrgTensorLSE const& lse,
+          FrgTensorSoftmaxRow const& lse,
+          FrgTensorSoftmaxRow const& max_logits,
+          float softmax_scale,
           SharedStorage& shared_storage,
           TiledMma tiled_mma,
           int thread_idx,
@@ -295,13 +300,21 @@ struct CollectiveEpilogueFwd {
         Tensor mLSE = make_tensor(make_gmem_ptr((!is_split ? params.ptr_LSE : params.ptr_LSE_partial) + offset_o * get<0>(!is_split ? params.stride_LSE : params.stride_LSE_partial)),
                                   params.shape_LSE_packed,
                                   !is_split ? params.stride_LSE_packed : params.stride_LSE_partial_packed)(_, bidh, !is_varlen ? bidb : 0, !is_split ? 0 : split_idx);
+
+        // size of max_logits and lse is the same
+        Tensor mMaxLogits = make_tensor(make_gmem_ptr(params.ptr_max_logits + offset_o * get<0>(params.stride_LSE)),
+                                        params.shape_LSE_packed,
+                                        params.stride_LSE_packed)(_, bidh, !is_varlen ? bidb : 0, 0);
         // if (thread_idx == 0) { printf("Before LSE write, m_block: %d, bidh: %d, bidb: %d, split_idx: %d, offset_o: %d, seqlen_o: %d\n", m_block, bidh, bidb, split_idx, offset_o, seqlen_o); print(mLSE); printf("\n"); }
         if (!LargeHeadDimV || warp_group_idx == 0) {
             if constexpr (!PackGQA) {
                 #pragma unroll
                 for (int mi = 0; mi < size(lse); ++mi) {
                     int const row = m_block * kBlockM + get<0>(taccOcO_row(mi));
-                    if (get<1>(taccOcO_row(_0{})) == 0 && row < seqlen_o) { mLSE(row) = lse(mi); }
+                    if (get<1>(taccOcO_row(_0{})) == 0 && row < seqlen_o) {
+                        mLSE(row) = lse(mi);
+                        mMaxLogits(row) = max_logits(mi) * softmax_scale;
+                    }
                 }
             } else {
                 PackGQA_t::store_LSE(mLSE, lse, tiled_mma, params.qhead_per_khead_divmod, thread_idx, seqlen_o, m_block);

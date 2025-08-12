@@ -441,7 +441,7 @@ public:
                 }
                 if (tile_valid) {
                     // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
-                    epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
+                    epilogue.store(params.epilogue, tOrO, softmax.row_sum, softmax.row_max, softmax_scale_log2 * float(M_LN2), shared_storage, tiled_mma_pv,
                                    threadIdx.x - MmaThreadOffset, block_coord);
                 } else {
                     // Write 0 to gO and -inf to gLSE.

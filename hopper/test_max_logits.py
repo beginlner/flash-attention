@@ -70,8 +70,9 @@ def scaled_dot_product_attention(query, key, value) -> torch.Tensor:
     value = value.repeat_interleave(h // h_k, dim=1)
     attn_weight = query @ key.transpose(-2, -1) / math.sqrt(query.size(-1))
     attn_weight += attn_bias
+    max_logits = attn_weight.max(dim=-1, keepdim=True)[0]
     attn_weight = torch.softmax(attn_weight, dim=-1, dtype=torch.float32)
-    return attn_weight.to(query.dtype) @ value
+    return attn_weight.to(query.dtype) @ value, max_logits
 
 
 def test_flash_attention():
@@ -97,36 +98,42 @@ def test_flash_attention():
         q1.grad = k1.grad = v1.grad = None
         kwargs = {}
         kwargs["deterministic"] = deterministic
+        kwargs["return_max_logits"] = True
         if causal:
             kwargs["causal"] = causal
         if window != 0:
             kwargs["window_size"] = window_size
         if provider == "FA3":
-            return flash_attn_func(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), **kwargs)[0].flatten(0, 1)
+            result = flash_attn_func(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), **kwargs)[0:3]
+            return result[0].flatten(0, 1), result[1], result[2]
         elif provider == "FA3 varlen":
-            return flash_attn_varlen_func(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, **kwargs)[0]
+            return flash_attn_varlen_func(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, s_q, s_k, **kwargs)[0:3]
         else:
             raise ValueError
 
-    def torch_attn():
+    def torch_attn_with_max_logits():
         q2.grad = k2.grad = v2.grad = None
-        return scaled_dot_product_attention(
+        result = scaled_dot_product_attention(
             q2.unflatten(0, (b, s_q)).float().transpose(1, 2),
             k2.unflatten(0, (b, s_k)).float().transpose(1, 2),
             v2.unflatten(0, (b, s_k)).float().transpose(1, 2),
-        ).to(dtype).transpose(1, 2).flatten(0, 1)
+        )
+        return result[0].to(dtype).transpose(1, 2).flatten(0, 1), result[1].squeeze()
 
     def fn(provider="FA3"):
-        flash_attn(provider).backward(grad_out) if has_bwd else flash_attn(provider)
+        fwd_result = flash_attn(provider)
+        if has_bwd:
+            fwd_result[0].backward(grad_out)
 
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         # fn("FA3")
         fn("FA3 varlen")
     print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
 
-    out_flash_attn = flash_attn("FA3 varlen")
-    out_torch_attn = torch_attn()
+    out_flash_attn, _, out_max_logits = flash_attn("FA3 varlen")
+    out_torch_attn, out_max_logits_ref = torch_attn_with_max_logits()
     assert_close(out_flash_attn, out_torch_attn, "out")
+    assert_close(out_max_logits, out_max_logits_ref, "max_logits")
 
     if has_bwd:
         out_flash_attn.backward(grad_out)
@@ -134,6 +141,7 @@ def test_flash_attention():
         assert_close(q1.grad, q2.grad, "dq")
         assert_close(k1.grad, k2.grad, "dk")
         assert_close(v1.grad, v2.grad, "dv")
+
     # timer(lambda: fn("FA3"), "FA3")
     timer(lambda: fn("FA3 varlen"), "FA3 varlen")
     # timer(lambda: fn("FA3"), "FA3")

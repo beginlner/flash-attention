@@ -81,6 +81,7 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *seqused_q,
                       void *seqused_k,
                       void *softmax_lse_d,
+                      void *max_logits_d,
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,
@@ -127,6 +128,9 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
+
+    // Max logits
+    params.max_logits_ptr = max_logits_d;
 
     // Set the dimensions.
     params.b = b;
@@ -229,6 +233,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                      seqused_q,
                      seqused_k,
                      softmax_lse_d,
+                     nullptr,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -683,7 +688,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         std::optional<at::Tensor> &scheduler_metadata_,  // (b + 1)
         int num_splits,
         std::optional<bool> pack_gqa_,
-        int const sm_margin
+        int const sm_margin,
+        bool const return_max_logits
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -868,6 +874,13 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
     }
 
+    at::Tensor max_logits;
+    if (!is_varlen_q) {
+        max_logits = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
+    } else {
+        max_logits = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+    }
+
     Flash_fwd_params params;
     set_params_fprop(params,
                      batch_size,
@@ -881,6 +894,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                      seqused_q_.has_value() ? seqused_q_.value().data_ptr() : nullptr,
                      seqused_k_.has_value() ? seqused_k_.value().data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
+                     max_logits.data_ptr(),
                      /*p_dropout=*/0.f,
                      softmax_scale,
                      window_size_left,
@@ -1152,10 +1166,14 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();
         softmax_lse.fill_(std::numeric_limits<float>::infinity());
+        if (return_max_logits) max_logits.fill_(std::numeric_limits<float>::infinity());
     }
 
     // return {out, softmax_lse};
-    return {out, softmax_lse, out_accum, softmax_lse_accum};
+    if (return_max_logits)
+        return {out, softmax_lse, max_logits, out_accum, softmax_lse_accum};
+    else
+        return {out, softmax_lse, out_accum, softmax_lse_accum};
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {

@@ -50,6 +50,9 @@ struct Flash_fwd_params : public Qkv_params {
     void * __restrict__ softmax_lse_ptr;
     void * __restrict__ softmax_lseaccum_ptr;
 
+    // The pointer to the max logits.
+    void * __restrict__ max_logits_ptr;
+
     // For FP8 scaling
     float * __restrict__ q_descale_ptr;
     float * __restrict__ k_descale_ptr;
