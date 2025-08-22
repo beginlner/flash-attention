@@ -78,7 +78,7 @@ struct Mask {
                 }
                 #pragma unroll
                 for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-                    int global_coord_q = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
+                    int global_coord_q = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM; // TODO: add cu_seqlens_q
                     int global_coord_k = get<Col>(tScS_rowcol(_0{}, n)) + n_block * kBlockN;
                     if(attn_mask[global_coord_q * stride_attn_mask + global_coord_k] == 0)
                         tSrS_rowcol(m, n) = -INFINITY;
