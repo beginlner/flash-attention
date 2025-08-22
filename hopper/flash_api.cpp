@@ -82,6 +82,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *seqused_k,
                       void *softmax_lse_d,
                       void *max_logits_d,
+                      void *attn_mask_d,
+                      const int stride_attn_mask,
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,
@@ -131,6 +133,10 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // Max logits
     params.max_logits_ptr = max_logits_d;
+
+    // attn_mask
+    params.attn_mask_ptr = attn_mask_d;
+    params.stride_attn_mask = stride_attn_mask;
 
     // Set the dimensions.
     params.b = b;
@@ -234,6 +240,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                      seqused_k,
                      softmax_lse_d,
                      nullptr,
+                     nullptr,
+                     0,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -689,7 +697,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         int num_splits,
         std::optional<bool> pack_gqa_,
         int const sm_margin,
-        bool const return_max_logits
+        bool const return_max_logits,
+        std::optional<at::Tensor> &attn_mask // (total_q, max_seqlen_k_) only support varlen
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -881,6 +890,13 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         max_logits = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
     }
 
+    bool const has_attn_mask = attn_mask.has_value();
+    int stride_attn_mask = 0;
+    if (has_attn_mask) {
+        TORCH_CHECK(attn_mask.value().stride(1) == 1);
+        stride_attn_mask = attn_mask.value().stride(0);
+    }
+
     Flash_fwd_params params;
     set_params_fprop(params,
                      batch_size,
@@ -895,6 +911,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                      seqused_k_.has_value() ? seqused_k_.value().data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
                      max_logits.data_ptr(),
+                     attn_mask.has_value() ? attn_mask.value().data_ptr() : nullptr,
+                     stride_attn_mask,
                      /*p_dropout=*/0.f,
                      softmax_scale,
                      window_size_left,

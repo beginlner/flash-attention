@@ -197,6 +197,7 @@ def _flash_attn_forward(
         pack_gqa,
         sm_margin,
         return_max_logits,
+        None,
     )
     return out, softmax_lse, *rest
 

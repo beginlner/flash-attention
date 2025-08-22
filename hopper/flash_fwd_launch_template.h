@@ -126,7 +126,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         params.kv_batch_idx,
         params.cu_seqlens_q, params.cu_seqlens_k, params.cu_seqlens_knew,
         params.seqused_q, params.seqused_k,
-        params.leftpad_k, params.seqlens_rotary
+        params.leftpad_k, params.seqlens_rotary,
+
+        static_cast<uint8_t const*>(params.attn_mask_ptr),
+        params.stride_attn_mask
     };
     constexpr bool Use_Varlen_TMA_O = CollectiveEpilogue::Use_Varlen_TMA_O;
     typename CollectiveEpilogue::Arguments epilogue_args {

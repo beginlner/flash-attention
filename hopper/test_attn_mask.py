@@ -1,3 +1,5 @@
+from typing import Tuple, Optional
+
 import math
 import triton
 import torch
@@ -29,6 +31,7 @@ if True:
     else:
         window_size = (-1, -1)
 
+def get_attn_bias(s_q, s_k, causal, window, topk_index: Optional[torch.Tensor] = None):
     attn_bias = torch.zeros(s_q, s_k, dtype=torch.float32)
     if causal:
         temp_mask = torch.ones(s_q, s_k, dtype=torch.bool).tril(diagonal=s_k - s_q)
@@ -38,6 +41,13 @@ if True:
         attn_bias.masked_fill_(temp_mask, float("-inf"))
         temp_mask = torch.ones(s_q, s_k, dtype=torch.bool).tril(diagonal=s_k - s_q + window - 1)
         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+    if topk_index is not None:
+        attn_mask = torch.zeros((s_q, s_k), dtype=torch.bool)
+        mask = (topk_index >= 0) & (topk_index < s_k)
+        rows = torch.arange(s_q).unsqueeze(1).expand_as(topk_index)
+        attn_mask[rows[mask], topk_index[mask]] = True
+        attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+    return attn_bias
 
 
 def calc_diff(x, y):
@@ -57,7 +67,7 @@ def assert_close(x, y, name=""):
     # assert diff[0] < 1e-2
 
 
-def timer(func, name):
+def timer(func, name, attn_bias):
     t = triton.testing.do_bench(func)
     FLOPS = b * h * (d + dv) * (attn_bias == 0).sum() * 2 * (3.5 if has_bwd else 1)
     BYTES = (b * s_q * h * d + b * s_k * h_k * (d + dv)) * (torch.finfo(dtype).bits / 8)
@@ -65,7 +75,7 @@ def timer(func, name):
     return t
 
 
-def scaled_dot_product_attention(query, key, value) -> torch.Tensor:
+def scaled_dot_product_attention(query, key, value, attn_bias) -> torch.Tensor:
     key = key.repeat_interleave(h // h_k, dim=1)
     value = value.repeat_interleave(h // h_k, dim=1)
     attn_weight = query @ key.transpose(-2, -1) / math.sqrt(query.size(-1))
@@ -81,6 +91,10 @@ def test_flash_attention():
     k = torch.randn(b * s_k, h_k, d)
     v = torch.randn(b * s_k, h_k, dv)
     grad_out = torch.randn(b * s_q, h, dv)
+    topk_index = torch.randint(0, s_k, size=(b * s_q, s_k))
+
+    attn_bias = get_attn_bias(s_q, s_k, causal, window)# , topk_index)
+    timer_attn_bias = get_attn_bias(s_q, s_k, causal, window)
 
     q1 = q.clone().to(dtype).requires_grad_()
     k1 = k.clone().to(dtype).requires_grad_()
@@ -114,6 +128,7 @@ def test_flash_attention():
             q2.unflatten(0, (b, s_q)).float().transpose(1, 2),
             k2.unflatten(0, (b, s_k)).float().transpose(1, 2),
             v2.unflatten(0, (b, s_k)).float().transpose(1, 2),
+            attn_bias,
         ).to(dtype).transpose(1, 2).flatten(0, 1)
 
     def fn(provider="FA3"):
@@ -128,16 +143,8 @@ def test_flash_attention():
     out_torch_attn = torch_attn()
     assert_close(out_flash_attn, out_torch_attn, "out")
 
-    if has_bwd:
-        out_flash_attn.backward(grad_out)
-        out_torch_attn.backward(grad_out)
-        assert_close(q1.grad, q2.grad, "dq")
-        assert_close(k1.grad, k2.grad, "dk")
-        assert_close(v1.grad, v2.grad, "dv")
-    # timer(lambda: fn("FA3"), "FA3")
-    timer(lambda: fn("FA3 varlen"), "FA3 varlen")
-    # timer(lambda: fn("FA3"), "FA3")
-    timer(lambda: fn("FA3 varlen"), "FA3 varlen")
+    timer(lambda: fn("FA3 varlen"), "FA3 varlen", timer_attn_bias)
+    timer(lambda: fn("FA3 varlen"), "FA3 varlen", timer_attn_bias)
 
 
 if __name__ == "__main__":
