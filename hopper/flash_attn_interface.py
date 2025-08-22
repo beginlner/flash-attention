@@ -112,6 +112,26 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+def topk_index_to_mask(
+        topk_index,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_k,
+):
+    total_q_len, top_k = topk_index.shape
+    batch_size = cu_seqlens_q.numel() - 1
+    mask = torch.zeros((total_q_len, max_seqlen_k), dtype=torch.uint8)
+    for b in range(batch_size):
+        q_start, q_end = cu_seqlens_q[b].item(), cu_seqlens_q[b+1].item()
+        k_start, k_end = cu_seqlens_k[b].item(), cu_seqlens_k[b+1].item()
+        q_rows = torch.arange(q_start, q_end)
+        batch_topk = topk_index[q_rows]
+        local_k = batch_topk - k_start
+        valid = (local_k >= 0) & (local_k < max_seqlen_k)
+        for i, row in enumerate(q_rows):
+            mask[row, local_k[i][valid[i]]] = 1
+    return mask
+
 def _flash_attn_forward(
         q,
         k,
@@ -146,7 +166,8 @@ def _flash_attn_forward(
         num_splits=1,
         pack_gqa=None,
         sm_margin=0,
-        return_max_logits=False
+        return_max_logits=False,
+        topk_index=None,
 ):
     assert return_max_logits == False or num_splits == 1, "max logits does not support split"
     assert return_max_logits == False or pack_gqa is None or pack_gqa == False, "max logits does not support packed_gqa"
@@ -161,6 +182,11 @@ def _flash_attn_forward(
     ]
     rotary_cos, rotary_sin = [maybe_contiguous(x) for x in (rotary_cos, rotary_sin)]
     seqlens_rotary = maybe_contiguous(seqlens_rotary)
+
+    if topk_index is not None:
+        attn_mask = topk_index_to_mask(topk_index, cu_seqlens_q, cu_seqlens_k, max_seqlen_k)
+    else:
+        attn_mask = None
     out, softmax_lse, *rest = flash_attn_3_cuda.fwd(
         q,
         k,
@@ -197,7 +223,7 @@ def _flash_attn_forward(
         pack_gqa,
         sm_margin,
         return_max_logits,
-        None,
+        attn_mask,
     )
     return out, softmax_lse, *rest
 
@@ -269,6 +295,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         num_heads_q=None,
         sm_margin=0,
         return_max_logits=False,
+        topk_index=None,
     ):
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
@@ -301,13 +328,14 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             softcap=softcap,
             sm_margin=sm_margin,
             return_max_logits=return_max_logits,
+            topk_index=topk_index,
         )
         if return_max_logits:
             out, softmax_lse, max_logits, *rest = out_tuple
         else:
             out, softmax_lse, *rest = out_tuple
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
-        ctx.save_for_backward(q, k, v, out, softmax_lse)
+        ctx.save_for_backward(q, k, v, out, softmax_lse, topk_index)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -321,8 +349,9 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse = ctx.saved_tensors
+        q, k, v, out, softmax_lse, topk_index = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
+        assert topk_index is None, "FA3 backward does not support topk_index"
         if ctx.ndim == 5:
             qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
             dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
@@ -377,6 +406,7 @@ class FlashAttnFunc(torch.autograd.Function):
         deterministic=False,
         sm_margin=0,
         return_max_logits=False,
+        topk_index=None,
     ):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
@@ -403,13 +433,14 @@ class FlashAttnFunc(torch.autograd.Function):
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             return_max_logits=return_max_logits,
+            topk_index=topk_index,
         )
         if return_max_logits:
             out, softmax_lse, max_logits, *rest = out_tuple
         else:
             out, softmax_lse, *rest = out_tuple
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
-        ctx.save_for_backward(q, k, v, out, softmax_lse)
+        ctx.save_for_backward(q, k, v, out, softmax_lse, topk_index)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -421,8 +452,9 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse = ctx.saved_tensors
+        q, k, v, out, softmax_lse, topk_index = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
+        assert topk_index is None, "FA3 backward does not support topk_index"
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
         _flash_attn_backward(
             dout,
@@ -476,6 +508,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         deterministic=False,
         sm_margin=0,
         return_max_logits=False,
+        topk_index=None,
     ):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
@@ -506,13 +539,14 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             return_max_logits=return_max_logits,
+            topk_index=topk_index,
         )
         if return_max_logits:
             out, softmax_lse, max_logits, *rest = out_tuple
         else:
             out, softmax_lse, *rest = out_tuple
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
-        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
+        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, topk_index)
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
@@ -526,8 +560,9 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = ctx.saved_tensors
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, topk_index = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
+        assert topk_index is None, "FA3 backward does not support topk_index"
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
         _flash_attn_backward(
             dout,
@@ -569,6 +604,7 @@ def flash_attn_qkvpacked_func(
     deterministic=False,
     num_heads_q=None,
     sm_margin=0,
+    topk_index=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -615,6 +651,7 @@ def flash_attn_qkvpacked_func(
         deterministic,
         num_heads_q,
         sm_margin,
+        topk_index,
     )
 
 
@@ -633,6 +670,7 @@ def flash_attn_func(
     pack_gqa=None,
     deterministic=False,
     sm_margin=0,
+    topk_index=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
@@ -694,6 +732,7 @@ def flash_attn_func(
         pack_gqa,
         deterministic,
         sm_margin,
+        topk_index,
     )
 
 
@@ -719,6 +758,7 @@ def flash_attn_varlen_func(
     deterministic=False,
     sm_margin=0,
     return_max_logits=False,
+    topk_index=None,
 ):
     return FlashAttnVarlenFunc.apply(
         q,
@@ -742,6 +782,7 @@ def flash_attn_varlen_func(
         deterministic,
         sm_margin,
         return_max_logits,
+        topk_index,
     )
 
 
@@ -781,6 +822,7 @@ def flash_attn_with_kvcache(
     sm_margin=0,     # Can be tuned if some SMs are used for communication
     return_softmax_lse=False,
     return_max_logits=False,
+    topk_index=None,
 ):
     """
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -909,6 +951,7 @@ def flash_attn_with_kvcache(
         pack_gqa=pack_gqa,
         sm_margin=sm_margin,
         return_max_logits=return_max_logits,
+        topk_index=topk_index,
     )
     # return (out, softmax_lse) if return_softmax_lse else out
     if return_max_logits:
