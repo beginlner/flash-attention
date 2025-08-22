@@ -147,7 +147,7 @@ def topk_index_to_mask_kernel(
     mask = index >= 0 and index < max_seqlen_k
 
     block_k_idx = index // 128
-    in_block_thread_idx = pid % 128 // 16 * 32 + pid % 8 * 4 + block_k_idx % 8 // 2
+    in_block_thread_idx = pid % 128 // 16 * 32 + pid % 8 * 4 + index % 8 // 2
 
     add_index = block_k_idx * 256 + in_block_thread_idx
     add_val = 1 << (pid % 16 // 8 * 32 + index % 128 // 8 * 2 + index % 2)
