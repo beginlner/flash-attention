@@ -1068,7 +1068,8 @@ struct CollectiveMainloopFwdSm90 {
 
         flash::Mask<kBlockM, kBlockN, PackGQA, TiledMmaQK> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/,
-            params.attention_chunk_divmod, params.qhead_per_khead_divmod
+            params.attention_chunk_divmod, params.qhead_per_khead_divmod,
+            params.attn_mask, params.stride_attn_mask
         );
 
         float softcap_val = params.softcap_val;
@@ -1227,7 +1228,7 @@ struct CollectiveMainloopFwdSm90 {
             int const n_block_min_before_local_mask = BlockMN_t::get_n_block_min_before_local_mask(
                 seqlen_info, m_block, n_block_min, params.window_size_left,
                 params.attention_chunk_divmod, params.qhead_per_khead_divmod);
-            auto no_mask_fn = [](auto& tSrS, int n_block) { };
+            auto no_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, false /*Local_mask*/>(tSrS, m_block, n_block); };
             #pragma unroll 1
             for (; n_block >= n_block_min_before_local_mask; --n_block) {
                 fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);

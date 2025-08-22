@@ -25,11 +25,16 @@ struct Mask {
     cutlass::FastDivmod const attention_chunk_divmod;
     cutlass::FastDivmod const qhead_per_khead_divmod;
 
+    uint8_t const* const attn_mask;
+    int const stride_attn_mask;
+
     CUTLASS_DEVICE
     Mask(const int thread_idx, const int seqlen_q, const int seqlen_k,
          const int window_size_left, const int window_size_right, const int sink_token_length,
          cutlass::FastDivmod const &attention_chunk_divmod,
-         cutlass::FastDivmod const &qhead_per_khead_divmod)
+         cutlass::FastDivmod const &qhead_per_khead_divmod,
+         uint8_t const* attn_mask=nullptr,
+         const int &stride_attn_mask=0)
         : thread_idx(thread_idx)
         , seqlen_q(seqlen_q)
         , seqlen_k(seqlen_k)
@@ -38,6 +43,8 @@ struct Mask {
         , sink_token_length(sink_token_length)
         , attention_chunk_divmod(attention_chunk_divmod)
         , qhead_per_khead_divmod(qhead_per_khead_divmod)
+        , attn_mask(attn_mask)
+        , stride_attn_mask(stride_attn_mask)
     {
     };
 
@@ -47,7 +54,6 @@ struct Mask {
     void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block) const {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
-        if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
 
         auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
@@ -64,6 +70,22 @@ struct Mask {
         // So we subtract the limit by the first col index of this thread (get<Col>(tScS_rowcol(_0{}, _0{})))
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
+        if (attn_mask != nullptr) {
+            #pragma unroll
+            for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+                if (Seqlenk_mask && int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+                    continue;
+                }
+                #pragma unroll
+                for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+                    int global_coord_q = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
+                    int global_coord_k = get<Col>(tScS_rowcol(_0{}, n)) + n_block * kBlockN;
+                    if(attn_mask[global_coord_q * stride_attn_mask + global_coord_k] == 0)
+                        tSrS_rowcol(m, n) = -INFINITY;
+                }
+            }
+        }
+        if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
         if constexpr (!Causal_mask && !Local_mask) {
             if constexpr (Seqlenk_mask) {  // Just masking based on col
                 #pragma unroll

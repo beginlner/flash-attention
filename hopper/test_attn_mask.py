@@ -91,9 +91,9 @@ def test_flash_attention():
     k = torch.randn(b * s_k, h_k, d)
     v = torch.randn(b * s_k, h_k, dv)
     grad_out = torch.randn(b * s_q, h, dv)
-    topk_index = torch.randint(0, s_k, size=(b * s_q, s_k))
+    topk_index = torch.randint(0, s_k, size=(b * s_q, 1024))
 
-    attn_bias = get_attn_bias(s_q, s_k, causal, window)# , topk_index)
+    attn_bias = get_attn_bias(s_q, s_k, causal, window, topk_index)
     timer_attn_bias = get_attn_bias(s_q, s_k, causal, window)
 
     q1 = q.clone().to(dtype).requires_grad_()
@@ -115,6 +115,7 @@ def test_flash_attention():
             kwargs["causal"] = causal
         if window != 0:
             kwargs["window_size"] = window_size
+        kwargs["topk_index"] = topk_index
         if provider == "FA3":
             return flash_attn_func(q1.unflatten(0, (b, s_q)), k1.unflatten(0, (b, s_k)), v1.unflatten(0, (b, s_k)), **kwargs)[0].flatten(0, 1)
         elif provider == "FA3 varlen":
@@ -141,7 +142,7 @@ def test_flash_attention():
 
     out_flash_attn = flash_attn("FA3 varlen")
     out_torch_attn = torch_attn()
-    assert_close(out_flash_attn, out_torch_attn, "out")
+    assert_close(out_flash_attn, torch.nan_to_num(out_torch_attn, nan=0.0), "out")
 
     timer(lambda: fn("FA3 varlen"), "FA3 varlen", timer_attn_bias)
     timer(lambda: fn("FA3 varlen"), "FA3 varlen", timer_attn_bias)
