@@ -139,8 +139,9 @@ def topk_index_to_mask_kernel(
     cu_seqlens_q_buf = tl.load(cu_seqlens_q + batch_range, mask=batch_range < batch_size, other=0)
     batch_idx = tl.max(tl.where(cu_seqlens_q_buf <= pid and batch_range < batch_size, batch_range, -1), axis=0)
     index_offset = tl.load(cu_seqlens_k + batch_idx)
+    pid_offset = tl.load(cu_seqlens_q + batch_idx)
 
-    block_q_idx = pid // 128
+    block_q_idx = (pid - pid_offset) // 128
     index = tl.load(index_ptr + tl.arange(0, index_topk)) - index_offset
     mask_ptr += batch_idx * num_blocks_q * num_blocks_k * 256 + block_q_idx * num_blocks_k * 256
 
@@ -179,7 +180,7 @@ def topk_index_to_mask_triton(
     batch_size = cu_seqlens_q.shape[0] - 1
     num_blocks_q = math.ceil(max_seqlen_q / 128)
     num_blocks_k = math.ceil(max_seqlen_k / 128)
-    mask = torch.zeros((batch_size, num_blocks_q, num_blocks_k, 256), dtype=torch.int64)
+    mask = torch.zeros((batch_size, num_blocks_q, num_blocks_k, 256), dtype=torch.int64, device=index.device)
 
     topk_index_to_mask_kernel[(total_q,)](
         index,
@@ -194,27 +195,6 @@ def topk_index_to_mask_triton(
         index_stride,
         index_topk,
     )
-    return mask
-
-
-def topk_index_to_mask(
-        topk_index,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_k,
-):
-    total_q_len, top_k = topk_index.shape
-    batch_size = cu_seqlens_q.numel() - 1
-    mask = torch.zeros((total_q_len, max_seqlen_k), dtype=torch.uint8)
-    for b in range(batch_size):
-        q_start, q_end = cu_seqlens_q[b].item(), cu_seqlens_q[b+1].item()
-        k_start, k_end = cu_seqlens_k[b].item(), cu_seqlens_k[b+1].item()
-        q_rows = torch.arange(q_start, q_end)
-        batch_topk = topk_index[q_rows]
-        local_k = batch_topk - k_start
-        valid = (local_k >= 0) & (local_k < max_seqlen_k)
-        for i, row in enumerate(q_rows):
-            mask[row, local_k[i][valid[i]]] = 1
     return mask
 
 

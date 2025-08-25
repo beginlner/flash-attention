@@ -55,7 +55,8 @@ struct Flash_fwd_params : public Qkv_params {
 
     // The pointer to the attn_mask and stride.
     void * __restrict__ attn_mask_ptr;
-    int stride_attn_mask;
+    int stride_attn_mask_q;
+    int stride_attn_mask_k;
 
     // For FP8 scaling
     float * __restrict__ q_descale_ptr;

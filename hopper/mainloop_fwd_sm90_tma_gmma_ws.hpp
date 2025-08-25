@@ -398,7 +398,8 @@ struct CollectiveMainloopFwdSm90 {
         int const* const seqlens_rotary = nullptr;
 
         uint64_t const* const attn_mask = nullptr;
-        int const stride_attn_mask = 0;
+        int const stride_attn_mask_q = 0;
+        int const stride_attn_mask_k = 0;
     };
 
     // Device side kernel params
@@ -458,7 +459,8 @@ struct CollectiveMainloopFwdSm90 {
         int const *const seqlens_rotary = nullptr;
 
         uint64_t const* const attn_mask = nullptr;
-        int const stride_attn_mask = 0;
+        int const stride_attn_mask_q = 0;
+        int const stride_attn_mask_k = 0;
     };
 
     static Params
@@ -571,7 +573,7 @@ struct CollectiveMainloopFwdSm90 {
                 args.kv_batch_idx,
                 args.cu_seqlens_q, args.cu_seqlens_k, args.cu_seqlens_k_new,
                 args.seqused_q, args.seqused_k, args.leftpad_k, args.seqlens_rotary,
-                args.attn_mask, args.stride_attn_mask};
+                args.attn_mask, args.stride_attn_mask_q, args.stride_attn_mask_k};
     }
 
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -1069,7 +1071,7 @@ struct CollectiveMainloopFwdSm90 {
         flash::Mask<kBlockM, kBlockN, PackGQA, TiledMmaQK> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/,
             params.attention_chunk_divmod, params.qhead_per_khead_divmod,
-            params.attn_mask, params.stride_attn_mask
+            params.attn_mask + params.stride_attn_mask_q * bidb, params.stride_attn_mask_k
         );
 
         float softcap_val = params.softcap_val;

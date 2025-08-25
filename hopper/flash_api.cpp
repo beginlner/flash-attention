@@ -83,7 +83,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *softmax_lse_d,
                       void *max_logits_d,
                       void *attn_mask_d,
-                      const int stride_attn_mask,
+                      const int stride_attn_mask_q,
+                      const int stride_attn_mask_k,
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,
@@ -136,7 +137,8 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // attn_mask
     params.attn_mask_ptr = attn_mask_d;
-    params.stride_attn_mask = stride_attn_mask;
+    params.stride_attn_mask_q = stride_attn_mask_q;
+    params.stride_attn_mask_k = stride_attn_mask_k;
 
     // Set the dimensions.
     params.b = b;
@@ -891,13 +893,14 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     }
 
     bool const has_attn_mask = attn_mask.has_value();
-    int stride_attn_mask = 0;
+    int stride_attn_mask_q = 0;
+    int stride_attn_mask_k = 0;
     if (has_attn_mask) {
         TORCH_CHECK(attn_mask.value().stride(3) == 1);
         TORCH_CHECK(attn_mask.value().stride(2) == 256);
         CHECK_SHAPE(attn_mask.value(), batch_size, (max_seqlen_q_.value() + 127) / 128, (max_seqlen_k_.value() + 127) / 128, 256);
-        // TODO: assert attn_mask is (b, max_q / 128, max_k / 128, 256)
-        stride_attn_mask = attn_mask.value().stride(1);
+        stride_attn_mask_q = attn_mask.value().stride(0);
+        stride_attn_mask_k = attn_mask.value().stride(1);
     }
 
     Flash_fwd_params params;
@@ -915,7 +918,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                      softmax_lse.data_ptr(),
                      max_logits.data_ptr(),
                      attn_mask.has_value() ? attn_mask.value().data_ptr() : nullptr,
-                     stride_attn_mask,
+                     stride_attn_mask_q,
+                     stride_attn_mask_k,
                      /*p_dropout=*/0.f,
                      softmax_scale,
                      window_size_left,

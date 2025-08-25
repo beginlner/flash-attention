@@ -81,19 +81,6 @@ struct Mask {
                     tSrS_rowcol(m, n) = -INFINITY;
                 }
             }
-            /*#pragma unroll
-            for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-                if (Seqlenk_mask && int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
-                    continue;
-                }
-                #pragma unroll
-                for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-                    int global_coord_q = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM; // TODO: add cu_seqlens_q
-                    int global_coord_k = get<Col>(tScS_rowcol(_0{}, n)) + n_block * kBlockN;
-                    if(attn_mask[global_coord_q * stride_attn_mask + global_coord_k] == 0)
-                        tSrS_rowcol(m, n) = -INFINITY;
-                }
-            }*/
         }
         if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
         if constexpr (!Causal_mask && !Local_mask) {

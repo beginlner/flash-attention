@@ -7,7 +7,7 @@ import torch
 
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func, topk_index_to_mask_triton
 
-b = 4
+b = 2
 mean_sq = 4096
 mean_sk = 4096
 h = 128
@@ -19,7 +19,7 @@ window = 0
 has_bwd = False
 deterministic = False
 varlen = False
-topk = 0
+topk = 512
 return_max_logits = False
 dtype = torch.bfloat16
 default_dtype = torch.bfloat16
@@ -88,42 +88,6 @@ def scaled_dot_product_attention(query, key, value, attn_bias, h, h_k) -> torch.
     attn_weight = torch.softmax(attn_weight, dim=-1, dtype=torch.float32)
     return attn_weight.to(query.dtype) @ value, max_logits
 
-def test_topk_mask_to_index():
-    s_q = 256
-    s_k = 256
-    b = 1
-    topk_index = torch.randint(0, s_k, size=(b * s_q, 128))
-
-    cu_seqlens_q = torch.arange(0, (b + 1) * s_q, s_q, dtype=torch.int32)
-    cu_seqlens_k = torch.arange(0, (b + 1) * s_k, s_k, dtype=torch.int32)
-
-    mask = topk_index_to_mask_triton(topk_index, cu_seqlens_q, cu_seqlens_k, s_q, s_k)
-
-    ref_mask = torch.zeros_like(mask)
-
-    add_pos = torch.zeros((128, 128), dtype=torch.int32)
-    add_val = torch.zeros((128, 128), dtype=torch.int64)
-
-    # print(ref_mask.shape)
-
-    for warp_idx in range(8):
-        for thread_idx in range(32):
-            for pos in range(64):
-                x = warp_idx * 16 + thread_idx // 4 + pos // 32 * 8
-                y = pos % 32 // 2 * 8 + thread_idx % 4 * 2 + pos % 2
-                add_pos[x, y] = warp_idx * 32 + thread_idx
-                if pos == 63:
-                    add_val[x, y] = -(1 << pos)
-                else:
-                    add_val[x, y] = (1 << pos)
-
-    for i in range(s_q):
-        for topk_j in range(128):
-            j = topk_index[i, topk_j]
-            ref_mask[0, i // 128, j // 128, add_pos[i % 128, j % 128]] |= add_val[i % 128, j % 128]
-    
-    print((ref_mask - mask).abs().max())
-
 
 def test_flash_attention():
     print(f"{b=}, {mean_sq=}, {mean_sk=}, {varlen=}, {h=}, {h_k=}, {d=}, {dv=}, {causal=}, {topk=}, {return_max_logits=}, {window_size=}")
@@ -151,7 +115,7 @@ def test_flash_attention():
     k = torch.randn(total_k, h_k, d)
     v = torch.randn(total_k, h_k, dv)
     grad_out = torch.randn(total_q, h, dv)
-    topk_index = torch.randint(0, max_seqlen_k, size=(total_q, topk)) if topk > 0 else None
+    topk_index = torch.randint(0, total_k, size=(total_q, topk)) if topk > 0 else None
 
     q1 = q.clone().requires_grad_()
     k1 = k.clone().requires_grad_()
@@ -199,7 +163,6 @@ def test_flash_attention():
             if return_max_logits:
                 max_logits.append(MAX_LOGITS.transpose(-2, -1))
         out = torch.cat(out)
-        print(out.shape)
         if return_max_logits:
             max_logits = torch.cat(max_logits)
             return out, max_logits
@@ -236,6 +199,4 @@ def test_flash_attention():
 
 
 if __name__ == "__main__":
-    # test_topk_mask_to_index()
-    # exit(0)
     test_flash_attention()
