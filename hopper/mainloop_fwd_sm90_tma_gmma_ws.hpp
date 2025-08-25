@@ -29,7 +29,7 @@ namespace flash {
 using namespace cute;
 
 template <int Stages, class ClusterShape_, class TileShape_MNK_, int kHeadDimV, class Element_, class ElementAccum_, class ArchTag_,
-        bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool PagedKVNonTMA_, bool AppendKV_, bool HasQv_,
+        bool Is_causal_, bool Is_local_, bool HasAttnMask, bool Has_softcap_, bool Varlen_, bool PagedKVNonTMA_, bool AppendKV_, bool HasQv_,
         bool MmaPV_is_RS, bool IntraWGOverlap, bool PackGQA_, bool Split_, bool V_colmajor_>
 struct CollectiveMainloopFwdSm90 {
 
@@ -1068,7 +1068,7 @@ struct CollectiveMainloopFwdSm90 {
         int const seqlen_k = seqlen_info.seqlen_k;
         int n_block = n_block_max - 1;
 
-        flash::Mask<kBlockM, kBlockN, PackGQA, TiledMmaQK> mask(
+        flash::Mask<kBlockM, kBlockN, PackGQA, TiledMmaQK, false, HasAttnMask> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/,
             params.attention_chunk_divmod, params.qhead_per_khead_divmod,
             params.attn_mask + params.stride_attn_mask_q * bidb, params.stride_attn_mask_k

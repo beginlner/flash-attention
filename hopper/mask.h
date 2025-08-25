@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cute/tensor.hpp>
+#include <cuda_runtime.h>
 
 #include "cutlass/fast_math.h"  // For cutlass::FastDivmod
 
@@ -14,7 +15,7 @@ namespace flash {
 
 using namespace cute;
 
-template <int kBlockM, int kBlockN, bool PackGQA, typename TiledMma, bool SwapAB=false>
+template <int kBlockM, int kBlockN, bool PackGQA, typename TiledMma, bool SwapAB=false, bool HasAttnMask=false>
 struct Mask {
 
     static_assert(!(PackGQA && SwapAB), "Cannot be both PackGQA and SwapAB");
@@ -70,9 +71,9 @@ struct Mask {
         // So we subtract the limit by the first col index of this thread (get<Col>(tScS_rowcol(_0{}, _0{})))
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
-        if (attn_mask != nullptr) {
+        if constexpr (HasAttnMask) {
             int offset = m_block * stride_attn_mask + n_block * 256 + threadIdx.x - 128;
-            uint64_t mask = attn_mask[offset];
+            uint64_t mask = __ldg(attn_mask + offset);
             #pragma unroll
             for(int i = 0; i < 64; i++) {
                 int n = i % 32;

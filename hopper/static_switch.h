@@ -185,3 +185,26 @@
       return __VA_ARGS__();                                                                      \
     }                                                                                            \
   }()
+
+#ifndef DISABLE_ATTN_MASK
+#define ATTN_MASK_SWITCH(COND, ...)             \
+  [&] {                                         \
+    if (COND) {                                 \
+      constexpr static bool HasAttnMask = true; \
+      return __VA_ARGS__();                     \
+    } else {                                    \
+      constexpr static bool HasAttnMask = false;\
+      return __VA_ARGS__();                     \
+    }                                           \
+  }()
+#else
+#define ATTN_MASK_SWITCH(COND, ...)                \
+  [&] {                                            \
+    if (COND) {                                    \
+      TORCH_CHECK(false, "attn_mask is disabled!");\
+    } else {                                       \
+      constexpr static bool HasAttnMask = false;   \
+      return __VA_ARGS__();                        \
+    }                                              \
+  }()
+#endif
