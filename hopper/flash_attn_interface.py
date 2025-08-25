@@ -270,9 +270,10 @@ def _flash_attn_forward(
     seqlens_rotary = maybe_contiguous(seqlens_rotary)
 
     if topk_index is not None:
-        attn_mask = topk_index_to_mask(topk_index, cu_seqlens_q, cu_seqlens_k, max_seqlen_k)
+        attn_mask = topk_index_to_mask_triton(topk_index, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
     else:
         attn_mask = None
+
     out, softmax_lse, *rest = flash_attn_3_cuda.fwd(
         q,
         k,

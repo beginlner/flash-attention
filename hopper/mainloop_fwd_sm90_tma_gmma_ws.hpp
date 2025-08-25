@@ -397,7 +397,7 @@ struct CollectiveMainloopFwdSm90 {
         int const* const leftpad_k = nullptr;
         int const* const seqlens_rotary = nullptr;
 
-        uint8_t const* const attn_mask = nullptr;
+        uint64_t const* const attn_mask = nullptr;
         int const stride_attn_mask = 0;
     };
 
@@ -457,7 +457,7 @@ struct CollectiveMainloopFwdSm90 {
         int const* const leftpad_k = nullptr;
         int const *const seqlens_rotary = nullptr;
 
-        uint8_t const* const attn_mask = nullptr;
+        uint64_t const* const attn_mask = nullptr;
         int const stride_attn_mask = 0;
     };
 

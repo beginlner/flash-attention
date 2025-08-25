@@ -893,8 +893,11 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     bool const has_attn_mask = attn_mask.has_value();
     int stride_attn_mask = 0;
     if (has_attn_mask) {
-        TORCH_CHECK(attn_mask.value().stride(1) == 1);
-        stride_attn_mask = attn_mask.value().stride(0);
+        TORCH_CHECK(attn_mask.value().stride(3) == 1);
+        TORCH_CHECK(attn_mask.value().stride(2) == 256);
+        CHECK_SHAPE(attn_mask.value(), batch_size, (max_seqlen_q_.value() + 127) / 128, (max_seqlen_k_.value() + 127) / 128, 256);
+        // TODO: assert attn_mask is (b, max_q / 128, max_k / 128, 256)
+        stride_attn_mask = attn_mask.value().stride(1);
     }
 
     Flash_fwd_params params;

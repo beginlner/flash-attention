@@ -128,7 +128,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         params.seqused_q, params.seqused_k,
         params.leftpad_k, params.seqlens_rotary,
 
-        static_cast<uint8_t const*>(params.attn_mask_ptr),
+        static_cast<uint64_t const*>(params.attn_mask_ptr),
         params.stride_attn_mask
     };
     constexpr bool Use_Varlen_TMA_O = CollectiveEpilogue::Use_Varlen_TMA_O;

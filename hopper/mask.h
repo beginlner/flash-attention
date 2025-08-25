@@ -25,7 +25,7 @@ struct Mask {
     cutlass::FastDivmod const attention_chunk_divmod;
     cutlass::FastDivmod const qhead_per_khead_divmod;
 
-    uint8_t const* const attn_mask;
+    uint64_t const* const attn_mask;
     int const stride_attn_mask;
 
     CUTLASS_DEVICE
@@ -33,7 +33,7 @@ struct Mask {
          const int window_size_left, const int window_size_right, const int sink_token_length,
          cutlass::FastDivmod const &attention_chunk_divmod,
          cutlass::FastDivmod const &qhead_per_khead_divmod,
-         uint8_t const* attn_mask=nullptr,
+         uint64_t const* attn_mask=nullptr,
          const int &stride_attn_mask=0)
         : thread_idx(thread_idx)
         , seqlen_q(seqlen_q)
@@ -71,7 +71,17 @@ struct Mask {
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
         if (attn_mask != nullptr) {
+            int offset = m_block * stride_attn_mask + n_block * 256 + threadIdx.x - 128;
+            uint64_t mask = attn_mask[offset];
             #pragma unroll
+            for(int i = 0; i < 64; i++) {
+                int n = i % 32;
+                int m = i / 32;
+                if (((mask >> i) & 1) == 0) {
+                    tSrS_rowcol(m, n) = -INFINITY;
+                }
+            }
+            /*#pragma unroll
             for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
                 if (Seqlenk_mask && int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
                     continue;
@@ -83,7 +93,7 @@ struct Mask {
                     if(attn_mask[global_coord_q * stride_attn_mask + global_coord_k] == 0)
                         tSrS_rowcol(m, n) = -INFINITY;
                 }
-            }
+            }*/
         }
         if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
         if constexpr (!Causal_mask && !Local_mask) {

@@ -128,7 +128,7 @@ def test_flash_attention():
     k = torch.randn(b * s_k, h_k, d)
     v = torch.randn(b * s_k, h_k, dv)
     grad_out = torch.randn(b * s_q, h, dv)
-    topk_index = torch.randint(0, s_k, size=(b * s_q, 1024))
+    topk_index = torch.randint(0, s_k, size=(b * s_q, 512))
 
     attn_bias = get_attn_bias(s_q, s_k, causal, window, topk_index)
     timer_attn_bias = get_attn_bias(s_q, s_k, causal, window)
@@ -186,4 +186,6 @@ def test_flash_attention():
 
 
 if __name__ == "__main__":
+    # test_topk_mask_to_index()
+    # exit(0)
     test_flash_attention()
