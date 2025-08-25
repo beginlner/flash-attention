@@ -18,7 +18,7 @@ causal = True
 window = 0
 has_bwd = False
 deterministic = False
-varlen = True
+varlen = False
 topk = 0
 return_max_logits = False
 dtype = torch.bfloat16
@@ -73,8 +73,8 @@ def assert_close(x, y, name=""):
 
 def timer(func, name, total_attn_compute, total_q, total_k):
     t = triton.testing.do_bench(func)
-    FLOPS = b * h * (d + dv) * total_attn_compute * 2 * (3.5 if has_bwd else 1)
-    BYTES = (b * total_q * h * d + b * total_k * h_k * (d + dv)) * (torch.finfo(dtype).bits / 8)
+    FLOPS = h * (d + dv) * total_attn_compute * 2 * (3.5 if has_bwd else 1)
+    BYTES = (total_q * h * d + total_k * h_k * (d + dv)) * (torch.finfo(dtype).bits / 8)
     print(f"{t} ms, {FLOPS / 10 ** 9 / t} TFLOP/s, {BYTES / 10 ** 6 / t} GB/s, name: {name}")
     return t
 
@@ -171,6 +171,7 @@ def test_flash_attention():
         if window != 0:
             kwargs["window_size"] = window_size
         kwargs["topk_index"] = topk_index
+        kwargs["return_max_logits"] = return_max_logits
         assert provider == "FA3 varlen"
         return flash_attn_varlen_func(q1, k1, v1, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs)
 
