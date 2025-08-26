@@ -186,7 +186,7 @@
     }                                                                                            \
   }()
 
-#ifndef DISABLE_ATTN_MASK
+#ifndef FLASHATTENTION_DISABLE_ATTN_MASK
 #define ATTN_MASK_SWITCH(COND, ...)             \
   [&] {                                         \
     if (COND) {                                 \

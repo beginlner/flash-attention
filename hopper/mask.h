@@ -26,9 +26,6 @@ struct Mask {
     cutlass::FastDivmod const attention_chunk_divmod;
     cutlass::FastDivmod const qhead_per_khead_divmod;
 
-    uint64_t const* const attn_mask;
-    int const stride_attn_mask;
-
     CUTLASS_DEVICE
     Mask(const int thread_idx, const int seqlen_q, const int seqlen_k,
          const int window_size_left, const int window_size_right, const int sink_token_length,
@@ -44,15 +41,13 @@ struct Mask {
         , sink_token_length(sink_token_length)
         , attention_chunk_divmod(attention_chunk_divmod)
         , qhead_per_khead_divmod(qhead_per_khead_divmod)
-        , attn_mask(attn_mask)
-        , stride_attn_mask(stride_attn_mask)
     {
     };
 
     template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
         typename Engine, typename Layout>
     CUTLASS_DEVICE
-    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block) const {
+    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block, const uint64_t mask=0) const {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
 
@@ -72,8 +67,6 @@ struct Mask {
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
         if constexpr (HasAttnMask) {
-            int offset = m_block * stride_attn_mask + n_block * 256 + threadIdx.x - 128;
-            uint64_t mask = __ldg(attn_mask + offset);
             #pragma unroll
             for(int i = 0; i < 64; i++) {
                 int n = i % 32;
