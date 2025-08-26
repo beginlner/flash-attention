@@ -1184,9 +1184,7 @@ struct CollectiveMainloopFwdSm90 {
 
             // Each step does gemm0 for iter n_block, gemm1 for iter n_block + 1, and softmax for iter n_block.
             auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
-                if constexpr (HasAttnMask) {
-                    load_attn_mask(n_block);
-                }
+                load_attn_mask(n_block);
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
                 PipelineState smem_pipe_read_v(smem_pipe_read.index(), smem_pipe_read.phase(), smem_pipe_read.count());
                 ++smem_pipe_read;

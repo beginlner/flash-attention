@@ -6,17 +6,14 @@ import triton.language as tl
 
 @triton.jit
 def topk_index_to_mask_kernel(
-        index_ptr,
-        mask_ptr,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        batch_size,
-        num_blocks_q,
-        num_blocks_k,
-        PADDED_BATCH_SIZE: tl.constexpr,
-        max_seqlen_k,
-        index_stride,
-        index_topk: tl.constexpr,
+    index_ptr,
+    mask_ptr,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    num_blocks_q,
+    num_blocks_k,
+    index_stride,
+    index_topk: tl.constexpr,
 ):
     batch_idx = tl.program_id(axis=0)
     cu_seqlen_q = tl.load(cu_seqlens_q + batch_idx)
@@ -52,12 +49,12 @@ def next_power_of_2(n: int) -> int:
 
 
 def topk_index_to_mask_triton(
-        index,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-):
+    index: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+) -> torch.Tensor:
     _, index_topk = index.shape
     # calc stride
     index_stride = index.stride(0)
@@ -74,11 +71,8 @@ def topk_index_to_mask_triton(
         mask,
         cu_seqlens_q,
         cu_seqlens_k,
-        batch_size,
         num_blocks_q,
         num_blocks_k,
-        next_power_of_2(batch_size),
-        max_seqlen_k,
         index_stride,
         index_topk,
     )

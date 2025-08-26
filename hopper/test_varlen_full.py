@@ -165,7 +165,7 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
         out_max_logits_ref = full_output_torch_attn[1]
         # TODO: support inf compare in max_logits
         assert_close(out_max_logits, torch.nan_to_num(out_max_logits_ref, nan=0.0), "max_logits")
-    
+
     if has_bwd:
         out_flash_attn.backward(grad_out)
         out_torch_attn.backward(grad_out)
