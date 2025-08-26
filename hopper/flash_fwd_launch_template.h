@@ -31,6 +31,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Causal and Local cannot be enabled at the same time");
     static_assert(!(AppendKV && V_colmajor), "AppendKV and V_colmajor cannot be enabled at the same time");
     static_assert(!(AppendKV && !Varlen), "AppendKV requires Varlen");
+    static_assert(!(HasAttnMask && Arch < 90), "Attention mask does not support <sm90!");
     static constexpr bool Is_FP8 = cute::is_same_v<Element, cutlass::float_e4m3_t> || cute::is_same_v<Element, cutlass::float_e5m2_t>;
     static constexpr bool FP8_TransposeV = Is_FP8 && !V_colmajor;
     using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -45,6 +46,11 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static constexpr int kNWarps = std::get<2>(kBlockMN_kNWarps_Stages_RS);
     static constexpr int kStages = Arch >= 90 ? 2 : std::get<3>(kBlockMN_kNWarps_Stages_RS);
     static constexpr bool Q_in_regs = Arch >= 90 ? false : std::get<4>(kBlockMN_kNWarps_Stages_RS);
+
+    if constexpr (HasAttnMask && (kBlockM != 128 && kBlockN != 128)) {
+        std::cerr << "attn_mask only support (kBlockM, kBlockN)=(128, 128)" << std::endl;
+        exit(-1);
+    }
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
     using TileShape_MNK_PV = cute::Shape<Int<kBlockM>, Int<kHeadDimV>, Int<kBlockN>>;
