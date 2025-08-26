@@ -7,33 +7,6 @@ import torch
 
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func, topk_index_to_mask_triton
 
-b = 2
-mean_sq = 4096
-mean_sk = 4096
-h = 128
-h_k = 128
-d = 192
-dv = 128
-causal = True
-window = 0
-has_bwd = False
-deterministic = False
-varlen = False
-topk = 512
-return_max_logits = False
-dtype = torch.bfloat16
-default_dtype = torch.bfloat16
-torch.set_default_dtype(default_dtype)
-device = torch.device("cuda:4")
-torch.set_default_device(device)
-torch.cuda.set_device(device)
-torch.manual_seed(0)
-
-if True:
-    if window > 0:
-        window_size = (window - 1, 0) if causal else (window - 1, window - 1)
-    else:
-        window_size = (-1, -1)
 
 def get_attn_bias(s_q, s_k, causal, window, topk_index: Optional[torch.Tensor] = None):
     attn_bias = torch.zeros(s_q, s_k, dtype=torch.float32)
@@ -89,7 +62,7 @@ def scaled_dot_product_attention(query, key, value, attn_bias, h, h_k) -> torch.
     return attn_weight.to(query.dtype) @ value, max_logits
 
 
-def test_flash_attention():
+def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, topk, return_max_logits, window_size):
     print(f"{b=}, {mean_sq=}, {mean_sk=}, {varlen=}, {h=}, {h_k=}, {d=}, {dv=}, {causal=}, {topk=}, {return_max_logits=}, {window_size=}")
 
     torch.manual_seed(0)
@@ -171,15 +144,16 @@ def test_flash_attention():
     def fn(provider="FA3"):
         flash_attn(provider)[0].backward(grad_out) if has_bwd else flash_attn(provider)[0]
 
-    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
-        fn("FA3 varlen")
-    print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
+    # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+    #     fn("FA3 varlen")
+    # print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
 
     full_output_flash_attn = flash_attn("FA3 varlen")
     full_output_torch_attn = torch_attn()
 
     out_flash_attn = full_output_flash_attn[0]
     out_torch_attn = full_output_torch_attn[0]
+
     assert_close(out_flash_attn, torch.nan_to_num(out_torch_attn, nan=0.0), "out")
 
     if return_max_logits:
@@ -196,8 +170,34 @@ def test_flash_attention():
         assert_close(v1.grad, v2.grad, "dv")
 
     timer(lambda: fn("FA3 varlen"), "FA3 varlen", total_attn_compute, total_q, total_k)
-    timer(lambda: fn("FA3 varlen"), "FA3 varlen", total_attn_compute, total_q, total_k)
+    # timer(lambda: fn("FA3 varlen"), "FA3 varlen", total_attn_compute, total_q, total_k)
 
 
 if __name__ == "__main__":
-    test_flash_attention()
+    b = 4
+    mean_sq = 4096
+    mean_sk = 4096
+    h = 128
+    h_k = 128
+    d = 192
+    dv = 128
+    window = 0
+    has_bwd = False
+    deterministic = False
+    return_max_logits = False
+    dtype = torch.bfloat16
+    default_dtype = torch.bfloat16
+    torch.set_default_dtype(default_dtype)
+    device = torch.device("cuda:4")
+    torch.set_default_device(device)
+    torch.cuda.set_device(device)
+    torch.manual_seed(0)
+
+    for causal in [False, True]:
+        for varlen in [False, True]:
+            for topk in [0, 512]:
+                if window > 0:
+                    window_size = (window - 1, 0) if causal else (window - 1, window - 1)
+                else:
+                    window_size = (-1, -1)
+                test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, topk, return_max_logits, window_size)
