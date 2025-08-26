@@ -47,7 +47,7 @@ struct Mask {
     template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
         typename Engine, typename Layout>
     CUTLASS_DEVICE
-    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block, const uint64_t mask=0) const {
+    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block, const uint64_t attn_mask_val=0) const {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
 
@@ -71,7 +71,7 @@ struct Mask {
             for(int i = 0; i < 64; i++) {
                 int n = i % 32;
                 int m = i / 32;
-                if (((mask >> i) & 1) == 0) {
+                if (((attn_mask_val >> i) & 1) == 0) {
                     tSrS_rowcol(m, n) = -INFINITY;
                 }
             }
