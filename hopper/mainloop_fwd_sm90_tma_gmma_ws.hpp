@@ -1143,12 +1143,12 @@ struct CollectiveMainloopFwdSm90 {
             Tensor tSsQ_copy_view = smem_thr_copy_Q.partition_S(cute::as_position_independent_swizzle_tensor(sQ));
             cute::copy(smem_tiled_copy_Q, tSsQ_copy_view, tSrQ_copy_view);
         }
+        uint64_t mask_val = 0;
+        auto load_mask = [&](int const m_block, int const n_block) {
+            mask_val = __ldg(params.attn_mask + params.stride_attn_mask_q * bidb + m_block * params.stride_attn_mask_k + n_block * 256 + threadIdx.x - 128);
+        };
 
         if constexpr (IntraWGOverlap) {
-            uint64_t mask_val = 0;
-            auto load_mask = [&](int const m_block, int const n_block) {
-                mask_val = __ldg(params.attn_mask + params.stride_attn_mask_q * bidb + m_block * params.stride_attn_mask_k + n_block * 256 + threadIdx.x - 128);
-            };
             if constexpr (HasAttnMask) {
                 load_mask(m_block, n_block);
             }
@@ -1270,11 +1270,14 @@ struct CollectiveMainloopFwdSm90 {
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_output_fp8(tOrO); }
             ++smem_pipe_read;
 
-        } else {  // No intra-WG overlap, does not support attn_mask
+        } else {  // No intra-WG overlap
 
             warp_scheduler_barrier_sync();
 
             auto fwd_step = [&](int const n_block, auto mask_fn, auto is_first_iter_type, auto check_inf_type) {
+                if constexpr (HasAttnMask) {
+                    load_mask(m_block, n_block);
+                }
                 static constexpr bool Is_first_iter = decltype(is_first_iter_type)::value;
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
                 auto smem_pipe_read_prev = smem_pipe_read;
@@ -1323,11 +1326,11 @@ struct CollectiveMainloopFwdSm90 {
                 pipeline_v.consumer_release(smem_pipe_read);  // release V
             };
 
-            auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+            auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block, mask_val); };
             fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
             --n_block;
             if constexpr (Is_causal || Is_local) { // Separate iterations with causal or local masking
-                auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+                auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block, mask_val); };
                 int const n_block_min_causal_local_mask = BlockMN_t::get_n_block_min_causal_local_mask(
                     seqlen_info, m_block, n_block_min, params.window_size_right,
                     params.attention_chunk_divmod, params.qhead_per_khead_divmod);
@@ -1339,14 +1342,14 @@ struct CollectiveMainloopFwdSm90 {
             int const n_block_min_before_local_mask = BlockMN_t::get_n_block_min_before_local_mask(
                 seqlen_info, m_block, n_block_min, params.window_size_left,
                 params.attention_chunk_divmod, params.qhead_per_khead_divmod);
-            auto no_mask_fn = [](auto& tSrS, int n_block) { };
+            auto no_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, false /*Local_mask*/>(tSrS, m_block, n_block, mask_val); };
             #pragma unroll 1
             for (; n_block >= n_block_min_before_local_mask; --n_block) {
                 fwd_step(n_block, no_mask_fn, cute::false_type{} /*is_first_iter*/, cute::false_type{} /*check_inf*/);
             }
             // Separate masking iterations on the left for local attention
             if constexpr (Is_local) {
-                auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
+                auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block, mask_val); };
                 #pragma unroll 1
                 for (; n_block >= n_block_min; --n_block) {
                     fwd_step(n_block, local_mask_fn, cute::false_type{} /*is_first_iter*/, cute::bool_constant<Is_local>{} /*check_inf*/);
