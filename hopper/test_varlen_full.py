@@ -154,7 +154,9 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
     out_flash_attn = full_output_flash_attn[0]
     out_torch_attn = full_output_torch_attn[0]
 
+    # print(seqlens_q, seqlens_k)
     # print(out_flash_attn.isnan().nonzero(as_tuple=False))
+    # print(out_flash_attn[3476])
 
     assert_close(out_flash_attn, torch.nan_to_num(out_torch_attn, nan=0.0), "out")
 
@@ -176,7 +178,7 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
 
 
 if __name__ == "__main__":
-    b = 4
+    b = 2
     mean_sq = 4096
     mean_sk = 4096
     h = 128
@@ -197,7 +199,7 @@ if __name__ == "__main__":
 
     for causal in [False, True]:
         for varlen in [False, True]:
-            for topk in [0, 2048]:
+            for topk in [0, 512]:
                 if window > 0:
                     window_size = (window - 1, 0) if causal else (window - 1, window - 1)
                 else:

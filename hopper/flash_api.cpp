@@ -82,9 +82,6 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *seqused_k,
                       void *softmax_lse_d,
                       void *max_logits_d,
-                      void *attn_mask_d,
-                      const int attn_mask_q_stride,
-                      const int attn_mask_k_stride,
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,
@@ -134,11 +131,6 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // Max logits
     params.max_logits_ptr = max_logits_d;
-
-    // attn_mask
-    params.attn_mask_ptr = attn_mask_d;
-    params.attn_mask_q_stride = attn_mask_q_stride;
-    params.attn_mask_k_stride = attn_mask_k_stride;
 
     // Set the dimensions.
     params.b = b;
@@ -242,9 +234,6 @@ void set_params_dgrad(Flash_bwd_params &params,
                      seqused_k,
                      softmax_lse_d,
                      nullptr,
-                     nullptr,
-                     0,
-                     0,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -918,9 +907,6 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                      seqused_k_.has_value() ? seqused_k_.value().data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
                      max_logits.data_ptr(),
-                     attn_mask.has_value() ? attn_mask.value().data_ptr() : nullptr,
-                     attn_mask_q_stride,
-                     attn_mask_k_stride,
                      /*p_dropout=*/0.f,
                      softmax_scale,
                      window_size_left,
@@ -933,6 +919,11 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     params.b_k = batch_size_k;
     params.dv = head_size_v;
     params.dv_rounded = head_size_v_rounded;
+
+    // attn_mask
+    params.attn_mask_ptr = attn_mask.has_value() ? attn_mask.value().data_ptr() : nullptr;
+    params.attn_mask_q_stride = attn_mask_q_stride;
+    params.attn_mask_k_stride = attn_mask_k_stride;
     if (leftpad_k_.has_value()) {  // This needs to be set before get_pagedkv_tma
         params.leftpad_k = static_cast<int *>(leftpad_k_.value().data_ptr());
     }
