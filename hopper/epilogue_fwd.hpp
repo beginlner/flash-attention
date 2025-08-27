@@ -455,11 +455,16 @@ struct CollectiveEpilogueFwd {
                                   !is_split ? params.stride_LSE_packed : params.stride_LSE_partial_packed)(_, bidh, !is_varlen ? bidb : 0, !is_split ? 0 : split_idx);
         Tensor gLSE = local_tile(mLSE, Shape<Int<kBlockM>>{}, make_coord(m_block));
 
+        // size of max_logits and lse is the same
+        Tensor mMaxLogits = make_tensor(make_gmem_ptr(params.ptr_max_logits + offset_o * get<0>(params.stride_LSE)),
+                                        params.shape_LSE_packed,
+                                        params.stride_LSE_packed)(_, bidh, !is_varlen ? bidb : 0, 0);
+
         static_assert(kBlockM <= NumEpilogueThreads);
         if (thread_idx < kBlockM) {
             const int row = m_block * kBlockM + thread_idx;
             if constexpr (!PackGQA) {
-                if (row < seqlen_o) { mLSE(row) = -INFINITY; }
+                if (row < seqlen_o) { mLSE(row) = -INFINITY; mMaxLogits(row) = -INFINITY; }
             } else {
                 if (row < seqlen_o * qhead_per_khead) {
                     int m_idx, h_idx;
