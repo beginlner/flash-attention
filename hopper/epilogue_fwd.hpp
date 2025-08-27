@@ -134,6 +134,7 @@ struct CollectiveEpilogueFwd {
         int32_t const nheads_kv;
         int const* cu_seqlens = nullptr;
         int const* seqused = nullptr;
+        int const seqlen_tma_offset = 0;
     };
 
     // Device side kernel params
@@ -158,6 +159,7 @@ struct CollectiveEpilogueFwd {
         TMA_O tma_store_O;
         int const* cu_seqlens = nullptr;
         int const* seqused = nullptr;
+        int const seqlen_tma_offset = 0;
     };
 
     static Params
@@ -203,7 +205,7 @@ struct CollectiveEpilogueFwd {
                 args.stride_LSE, shape_LSE_packed, stride_LSE_packed,
                 args.ptr_LSE_partial, args.stride_LSE_partial, stride_LSE_partial_packed,
                 cutlass::FastDivmod(qhead_per_khead),
-                tma_store_O, args.cu_seqlens, args.seqused};
+                tma_store_O, args.cu_seqlens, args.seqused, args.seqlen_tma_offset};
     }
 
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -472,7 +474,7 @@ struct CollectiveEpilogueFwd {
         // If split, we don't have to write 0 to mOpartial if the mha_combine kernel is used,
         // since it will not use the value of O if LSE is -inf.
         if (!is_split) {
-            Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O + offset_o * get<0>(params.stride_O)), params.shape_O_packed, params.stride_O_packed)(_, _, bidh, !is_varlen ? bidb : 0, _0{});
+            Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O + (offset_o + params.seqlen_tma_offset) * get<0>(params.stride_O)), params.shape_O_packed, params.stride_O_packed)(_, _, bidh, !is_varlen ? bidb : 0, _0{});
 
             GmemTiledCopyO gmem_tiled_copy_O;
             auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);

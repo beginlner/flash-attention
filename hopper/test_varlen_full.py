@@ -52,12 +52,15 @@ def timer(func, name, total_attn_compute, total_q, total_k):
     return t
 
 
-def scaled_dot_product_attention(query, key, value, attn_bias, h, h_k) -> torch.Tensor:
+def scaled_dot_product_attention(query, key, value, attn_bias, h, h_k, return_max_logits) -> torch.Tensor:
     key = key.repeat_interleave(h // h_k, dim=1)
     value = value.repeat_interleave(h // h_k, dim=1)
     attn_weight = query @ key.transpose(-2, -1) / math.sqrt(query.size(-1))
     attn_weight += attn_bias
-    max_logits = attn_weight.max(dim=-1, keepdim=True)[0]
+    if return_max_logits:
+        max_logits = attn_weight.max(dim=-1, keepdim=True)[0]
+    else:
+        max_logits = None
     attn_weight = torch.softmax(attn_weight, dim=-1, dtype=torch.float32)
     return attn_weight.to(query.dtype) @ value, max_logits
 
@@ -75,7 +78,8 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
             seqlens_q[i] = max(random.normalvariate(mean_sq, mean_sq / 2), 1)
         for i in range(b):
             seqlens_k[i] = max(random.normalvariate(mean_sk, mean_sk / 2), seqlens_q[i].item() - 50)
-    # seqlens_q[1] = 0  # Test the corner case that seqlen_q = 0 & seqlen_k > 0
+    # seqlens_q[1] = 1  # Test the corner case that seqlen_q = 1 & seqlen_k = 0
+    # seqlens_k[1] = 0
     cu_seqlens_q = torch.cumsum(torch.nn.functional.pad(seqlens_q, (1, 0)), 0, dtype=torch.int32)
     cu_seqlens_k = torch.cumsum(torch.nn.functional.pad(seqlens_k, (1, 0)), 0, dtype=torch.int32)
     total_q = seqlens_q.sum().item()
@@ -127,6 +131,7 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
                     causal, window,
                     None if topk_index is None else (topk_index[cu_seqlens_q[i].item(): cu_seqlens_q[i + 1].item(), :] - cu_seqlens_k[i])),
                 h=h, h_k=h_k,
+                return_max_logits=return_max_logits,
             )
             if return_max_logits:
                 OUT, MAX_LOGITS = OUT_TENSORS
