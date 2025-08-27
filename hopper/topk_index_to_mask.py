@@ -35,7 +35,7 @@ def topk_index_to_mask_kernel(
     in_block_thread_idx = seq_idx % 128 // 16 * 32 + seq_idx % 8 * 4 + index % 8 // 2
 
     add_index = block_k_idx * 256 + in_block_thread_idx
-    add_val = 1 << (seq_idx % 16 // 8 * 32 + index % 128 // 8 * 2 + index % 2)
+    add_val = 1 << (seq_idx % 16 // 8 * 32 + index % 128 // 8 * 2 + index % 2).to(tl.int64)
 
     tl.atomic_or(mask_ptr + add_index, add_val, mask=mask)
 

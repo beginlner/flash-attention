@@ -36,12 +36,18 @@ def calc_diff(x, y):
     return 1 - sim.item(), RMSE
 
 
-def assert_close(x, y, name=""):
+def assert_close(x: torch.Tensor, y: torch.Tensor, name: str, eps: float = 1e-5) -> None:
+    assert x.shape == y.shape, f"{x.shape=}, {y.shape=}"
+    assert not x.isnan().any() and not y.isnan().any()
+    x, y = x.clone(), y.clone()
+    x[x.isfinite().logical_not()] = 0
+    y[y.isfinite().logical_not()] = 0
     x, y = x.double(), y.double()
-    diff = calc_diff(x, y)
-    amax = (x - y).abs().max()
-    print(f"{name} diff: {diff}, amax: {amax}")
-    # assert diff[0] < 1e-2
+    RMSE = ((x - y) * (x - y)).mean().sqrt().item()
+    cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
+    amax_diff = (x - y).abs().max().item()
+    # print(f"{name}: {cos_diff=}, {RMSE=}, {amax_diff=}")
+    assert cos_diff < eps, f"{name}: {cos_diff=}, {RMSE=}, {amax_diff=}"
 
 
 def timer(func, name, total_attn_compute, total_q, total_k):
@@ -88,7 +94,7 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
     k = torch.randn(total_k, h_k, d)
     v = torch.randn(total_k, h_k, dv)
     grad_out = torch.randn(total_q, h, dv)
-    topk_index = torch.randint(0, total_k, size=(total_q, topk)) if topk > 0 else None
+    topk_index = torch.randint(0, total_k, size=(total_q, topk), dtype=torch.int32) if topk > 0 else None
 
     q1 = q.clone().requires_grad_()
     k1 = k.clone().requires_grad_()
@@ -144,19 +150,11 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
     def fn(provider="FA3"):
         flash_attn(provider)[0].backward(grad_out) if has_bwd else flash_attn(provider)[0]
 
-    # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
-    #     fn("FA3 varlen")
-    # print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=120))
-
     full_output_flash_attn = flash_attn("FA3 varlen")
     full_output_torch_attn = torch_attn()
 
     out_flash_attn = full_output_flash_attn[0]
     out_torch_attn = full_output_torch_attn[0]
-
-    # print(seqlens_q, seqlens_k)
-    # print(out_flash_attn.isnan().nonzero(as_tuple=False))
-    # print(out_flash_attn[3476])
 
     assert_close(out_flash_attn, torch.nan_to_num(out_torch_attn, nan=0.0), "out")
 
