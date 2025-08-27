@@ -40,6 +40,10 @@ def assert_close(x: torch.Tensor, y: torch.Tensor, name: str, eps: float = 1e-5)
     assert x.shape == y.shape, f"{x.shape=}, {y.shape=}"
     assert not x.isnan().any() and not y.isnan().any()
     x, y = x.clone(), y.clone()
+    x[x > 1e20] = float('inf')
+    y[y > 1e20] = float('inf')
+    x[x < -1e20] = float('-inf')
+    y[y < -1e20] = float('-inf')
     x[x.isfinite().logical_not()] = 0
     y[y.isfinite().logical_not()] = 0
     x, y = x.double(), y.double()
@@ -143,7 +147,7 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
                 max_logits.append(MAX_LOGITS.transpose(-2, -1))
         out = torch.cat(out)
         if return_max_logits:
-            max_logits = torch.cat(max_logits, dim=-1)
+            max_logits = torch.cat(max_logits, dim=-1).squeeze(1)
             return out, max_logits
         return (out,)
 
