@@ -642,7 +642,7 @@ setup(
             "benchmarks",
         )
     ),
-    py_modules=["flash_attn_interface"],
+    py_modules=["flash_attn_interface", "topk_index_to_mask"],
     description="FlashAttention-3",
     long_description=long_description,
     long_description_content_type="text/markdown",
