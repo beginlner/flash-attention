@@ -165,7 +165,6 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
     if return_max_logits:
         out_max_logits = full_output_flash_attn[2]
         out_max_logits_ref = full_output_torch_attn[1]
-        # TODO: support inf compare in max_logits
         assert_close(out_max_logits, torch.nan_to_num(out_max_logits_ref, nan=0.0), "max_logits")
 
     if has_bwd:
@@ -190,7 +189,7 @@ if __name__ == "__main__":
     window = 0
     has_bwd = False
     deterministic = False
-    return_max_logits = False
+    return_max_logits = True
     dtype = torch.bfloat16
     default_dtype = torch.bfloat16
     torch.set_default_dtype(default_dtype)
