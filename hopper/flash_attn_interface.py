@@ -3,12 +3,11 @@
 from typing import Optional, Union
 
 import torch
-import torch.nn as nn
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import flash_attn_3_cuda
-from topk_index_to_mask import topk_index_to_mask_triton 
+from topk_index_to_mask import topk_index_to_mask_triton
 
 # isort: on
 
@@ -351,9 +350,9 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             v,
             out,
             softmax_lse,
-            None, None, # cu_seqlens_q, cu_seqlens_k,
-            None, None, # sequed_q, sequed_k,
-            None, None, # max_seqlen_q, max_seqlen_k,
+            None, None,  # cu_seqlens_q, cu_seqlens_k,
+            None, None,  # sequed_q, sequed_k,
+            None, None,  # max_seqlen_q, max_seqlen_k,
             dq,
             dk,
             dv,
@@ -445,9 +444,9 @@ class FlashAttnFunc(torch.autograd.Function):
             v,
             out,
             softmax_lse,
-            None, None, # cu_seqlens_q, cu_seqlens_k,
-            None, None, # sequed_q, sequed_k,
-            None, None, # max_seqlen_q, max_seqlen_k,
+            None, None,  # cu_seqlens_q, cu_seqlens_k,
+            None, None,  # sequed_q, sequed_k,
+            None, None,  # max_seqlen_q, max_seqlen_k,
             dq,
             dk,
             dv,
@@ -796,7 +795,7 @@ def flash_attn_with_kvcache(
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
     attention_chunk=0,
-    softcap=0.0, # 0.0 means deactivated
+    softcap=0.0,  # 0.0 means deactivated
     rotary_interleaved=True,
     scheduler_metadata=None,
     num_splits=0,    # Can be tuned for speed
