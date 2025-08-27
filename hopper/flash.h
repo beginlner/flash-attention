@@ -53,6 +53,11 @@ struct Flash_fwd_params : public Qkv_params {
     // The pointer to the max logits.
     void * __restrict__ max_logits_ptr;
 
+    // The pointer to the attn_mask and stride.
+    void * __restrict__ attn_mask_ptr;
+    int attn_mask_q_stride;
+    int attn_mask_k_stride;
+
     // For FP8 scaling
     float * __restrict__ q_descale_ptr;
     float * __restrict__ k_descale_ptr;

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cute/tensor.hpp>
+#include <cuda_runtime.h>
 
 #include "cutlass/fast_math.h"  // For cutlass::FastDivmod
 
@@ -14,7 +15,7 @@ namespace flash {
 
 using namespace cute;
 
-template <int kBlockM, int kBlockN, bool PackGQA, typename TiledMma, bool SwapAB=false>
+template <int kBlockM, int kBlockN, bool PackGQA, typename TiledMma, bool SwapAB=false, bool HasAttnMask=false>
 struct Mask {
 
     static_assert(!(PackGQA && SwapAB), "Cannot be both PackGQA and SwapAB");
@@ -29,7 +30,9 @@ struct Mask {
     Mask(const int thread_idx, const int seqlen_q, const int seqlen_k,
          const int window_size_left, const int window_size_right, const int sink_token_length,
          cutlass::FastDivmod const &attention_chunk_divmod,
-         cutlass::FastDivmod const &qhead_per_khead_divmod)
+         cutlass::FastDivmod const &qhead_per_khead_divmod,
+         uint64_t const* attn_mask=nullptr,
+         const int &stride_attn_mask=0)
         : thread_idx(thread_idx)
         , seqlen_q(seqlen_q)
         , seqlen_k(seqlen_k)
@@ -44,10 +47,9 @@ struct Mask {
     template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
         typename Engine, typename Layout>
     CUTLASS_DEVICE
-    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block) const {
+    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block, const uint64_t attn_mask_val=0) const {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
-        if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
 
         auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
@@ -64,6 +66,17 @@ struct Mask {
         // So we subtract the limit by the first col index of this thread (get<Col>(tScS_rowcol(_0{}, _0{})))
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
+        if constexpr (HasAttnMask) {
+            #pragma unroll
+            for(int i = 0; i < 64; i++) {
+                int n = i % 32;
+                int m = i / 32;
+                if (((attn_mask_val >> i) & 1) == 0) {
+                    tSrS_rowcol(m, n) = -INFINITY;
+                }
+            }
+        }
+        if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
         if constexpr (!Causal_mask && !Local_mask) {
             if constexpr (Seqlenk_mask) {  // Just masking based on col
                 #pragma unroll

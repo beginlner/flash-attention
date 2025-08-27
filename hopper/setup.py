@@ -63,6 +63,8 @@ DISABLE_HDIM192 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM192", "FALSE") == "TRUE
 DISABLE_HDIM256 = os.getenv("FLASH_ATTENTION_DISABLE_HDIM256", "TRUE") == "TRUE"
 DISABLE_SM8x = os.getenv("FLASH_ATTENTION_DISABLE_SM80", "TRUE") == "TRUE"
 
+DISABLE_ATTN_MASK = os.getenv("FLASH_ATTENTION_DISABLE_ATTN_MASK", "FALSE") == "TRUE"
+
 ENABLE_VCOLMAJOR = os.getenv("FLASH_ATTENTION_ENABLE_VCOLMAJOR", "TRUE") == "TRUE"
 
 
@@ -451,6 +453,7 @@ if not SKIP_CUDA_BUILD:
 
     feature_args = (
         []
+        + (["-DFLASHATTENTION_DISABLE_ATTN_MASK"] if DISABLE_ATTN_MASK else [])
         + (["-DFLASHATTENTION_DISABLE_BACKWARD"] if DISABLE_BACKWARD else [])
         + (["-DFLASHATTENTION_DISABLE_PAGEDKV"] if DISABLE_PAGEDKV else [])
         + (["-DFLASHATTENTION_DISABLE_SPLIT"] if DISABLE_SPLIT else [])
@@ -639,7 +642,7 @@ setup(
             "benchmarks",
         )
     ),
-    py_modules=["flash_attn_interface"],
+    py_modules=["flash_attn_interface", "topk_index_to_mask"],
     description="FlashAttention-3",
     long_description=long_description,
     long_description_content_type="text/markdown",

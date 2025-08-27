@@ -689,7 +689,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         int num_splits,
         std::optional<bool> pack_gqa_,
         int const sm_margin,
-        bool const return_max_logits
+        bool const return_max_logits,
+        std::optional<at::Tensor> &attn_mask // (total_q, max_seqlen_k_) only support varlen
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -881,6 +882,17 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         max_logits = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
     }
 
+    bool const has_attn_mask = attn_mask.has_value();
+    int attn_mask_q_stride = 0;
+    int attn_mask_k_stride = 0;
+    if (has_attn_mask) {
+        TORCH_CHECK(attn_mask.value().stride(3) == 1);
+        TORCH_CHECK(attn_mask.value().stride(2) == 256);
+        CHECK_SHAPE(attn_mask.value(), batch_size, (max_seqlen_q_.value() + 127) / 128, (max_seqlen_k_.value() + 127) / 128, 256);
+        attn_mask_q_stride = attn_mask.value().stride(0);
+        attn_mask_k_stride = attn_mask.value().stride(1);
+    }
+
     Flash_fwd_params params;
     set_params_fprop(params,
                      batch_size,
@@ -907,6 +919,11 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     params.b_k = batch_size_k;
     params.dv = head_size_v;
     params.dv_rounded = head_size_v_rounded;
+
+    // attn_mask
+    params.attn_mask_ptr = attn_mask.has_value() ? attn_mask.value().data_ptr() : nullptr;
+    params.attn_mask_q_stride = attn_mask_q_stride;
+    params.attn_mask_k_stride = attn_mask_k_stride;
     if (leftpad_k_.has_value()) {  // This needs to be set before get_pagedkv_tma
         params.leftpad_k = static_cast<int *>(leftpad_k_.value().data_ptr());
     }

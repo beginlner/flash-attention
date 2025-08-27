@@ -61,7 +61,7 @@ __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tenso
 }
 
 // Apply the exp to all the elements.
-template <bool Scale_max=true, bool Check_inf=true, int Max_offset=0,
+template <bool Scale_max=true, int Max_offset=0,
         typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0> &tensor, Tensor<Engine1, Layout1> const &max, const float scale) {
     // For FP8, we can subtract max by 8.0 so that the value after exp2 is in the range of [0, 256].
@@ -72,11 +72,7 @@ __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0> &tenso
     CUTE_STATIC_ASSERT_V(size<0>(max) == size<0>(tensor));
     #pragma unroll
     for (int mi = 0; mi < size<0>(tensor); ++mi) {
-        // If max is -inf, then all elements must have been -inf (possibly due to masking).
-        // We don't want (-inf - (-inf)) since that would give NaN.
-        const float max_scaled = Check_inf
-            ? (max(mi) == -INFINITY ? 0.f : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset)
-            : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset;
+        const float max_scaled = (!Scale_max ? max(mi) : max(mi) * scale) - max_offset;
         #pragma unroll
         for (int ni = 0; ni < size<1>(tensor); ++ni)  {
             // Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
@@ -96,42 +92,39 @@ struct Softmax {
     TensorT row_max, row_sum;
     float const softmax_scale_log2;
 
-    CUTLASS_DEVICE Softmax(float const softmax_scale_log2_) : softmax_scale_log2(softmax_scale_log2_) {};
+    CUTLASS_DEVICE Softmax(float const softmax_scale_log2_) : softmax_scale_log2(softmax_scale_log2_) {
+        for (int mi = 0; mi < size(row_max); ++mi) {
+            row_max(mi) = -1e30;
+            row_sum(mi) = 0.f;
+        }
+    };
 
-    template<bool Is_first, bool Check_inf=false, typename Tensor0>
+    template<typename Tensor0>
     __forceinline__ __device__ TensorT max_get_scale(Tensor0 &acc_s) {
         // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
         TensorT scores_scale;
-        if constexpr (Is_first) {
-            flash::template reduce_max</*zero_init=*/true>(scores, row_max);
-            cute::fill(scores_scale, 1.f);
-        } else {
-            Tensor scores_max_prev = make_fragment_like(row_max);
-            cute::copy(row_max, scores_max_prev);
-            flash::template reduce_max</*zero_init=*/false>(scores, row_max);
-            #pragma unroll
-            for (int mi = 0; mi < size(row_max); ++mi) {
-                float scores_max_cur = !Check_inf
-                    ? row_max(mi)
-                    : (row_max(mi) == -INFINITY ? 0.0f : row_max(mi));
-                scores_scale(mi) = exp2f((scores_max_prev(mi) - scores_max_cur) * softmax_scale_log2);
-                row_sum(mi) *= scores_scale(mi);
-            }
+        Tensor scores_max_prev = make_fragment_like(row_max);
+        cute::copy(row_max, scores_max_prev);
+        flash::template reduce_max</*zero_init=*/false>(scores, row_max);
+        #pragma unroll
+        for (int mi = 0; mi < size(row_max); ++mi) {
+            scores_scale(mi) = exp2f((scores_max_prev(mi) - row_max(mi)) * softmax_scale_log2);
+            row_sum(mi) *= scores_scale(mi);
         }
         return scores_scale;
     };
 
-    template<bool Is_first, bool Check_inf=false, typename Tensor0>
+    template<typename Tensor0>
     __forceinline__ __device__ void online_softmax(Tensor0 &acc_s) {
         // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
-        flash::template scale_apply_exp2</*Scale_max=*/true, Check_inf, Max_offset>(scores, row_max, softmax_scale_log2);
+        flash::template scale_apply_exp2</*Scale_max=*/true, Max_offset>(scores, row_max, softmax_scale_log2);
         // We don't do the reduce across threads here since we don't need to use the row_sum.
         // We do that reduce at the end when we need to normalize the softmax.
-        flash::reduce_sum</*zero_init=*/Is_first, /*warp_reduce=*/false>(scores, row_sum);
+        flash::reduce_sum</*zero_init=*/false, /*warp_reduce=*/false>(scores, row_sum);
     };
 
     __forceinline__ __device__ TensorT finalize(float const final_scale=1.f) {
