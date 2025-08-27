@@ -139,7 +139,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     };
     constexpr bool Use_Varlen_TMA_O = CollectiveEpilogue::Use_Varlen_TMA_O;
     typename CollectiveEpilogue::Arguments epilogue_args {
-        !Use_Varlen_TMA_O ? static_cast<ElementOut*>(params.o_ptr) : static_cast<ElementOut*>(params.o_ptr) - params.seqlen_q * params.o_row_stride,
+        static_cast<ElementOut*>(params.o_ptr),
         {!Use_Varlen_TMA_O ? seqlen_q : params.seqlen_q, params.dv, params.h, !Use_Varlen_TMA_O ? batch_q : seqlen_q + params.seqlen_q, params.num_splits},  // shape_O
         {params.o_row_stride, _1{}, params.o_head_stride, !Use_Varlen_TMA_O ? (!is_varlen_q ? params.o_batch_stride : 0) : params.o_row_stride, 0}, // stride_O
         static_cast<float*>(params.oaccum_ptr),
@@ -150,7 +150,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         static_cast<float*>(params.softmax_lseaccum_ptr),
         {_1{}, seqlen_q, !is_varlen_q ? params.h * seqlen_q : 0, params.h * seqlen_q * batch_q},  // stride_LSE_partial
         params.h_k,
-        params.cu_seqlens_q, params.seqused_q
+        params.cu_seqlens_q, params.seqused_q, params.seqlen_q
     };
 
     int qhead_per_khead = !PackGQA ? 1 : cutlass::ceil_div(params.h, params.h_k);

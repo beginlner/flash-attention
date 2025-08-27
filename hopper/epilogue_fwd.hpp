@@ -134,6 +134,7 @@ struct CollectiveEpilogueFwd {
         int32_t const nheads_kv;
         int const* cu_seqlens = nullptr;
         int const* seqused = nullptr;
+        int const seqlen_tma_offset = 0;
     };
 
     // Device side kernel params
@@ -162,7 +163,7 @@ struct CollectiveEpilogueFwd {
 
     static Params
     to_underlying_arguments(Arguments const& args) {
-        Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.shape_O, args.stride_O);
+        Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O - args.seqlen_tma_offset * get<0>(args.stride_O)), args.shape_O, args.stride_O);
         TMA_O tma_store_O = [&]{
             if constexpr (Use_TMA_O) {
                 return make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutO{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
