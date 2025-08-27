@@ -75,8 +75,13 @@ def scaled_dot_product_attention(query, key, value, attn_bias, h, h_k, return_ma
             max_logits = torch.full((b, q, 1), float('-inf'), dtype=attn_weight.dtype)
     else:
         max_logits = None
+    if attn_weight.shape[-1] > 0:
+        lse = attn_weight.logsumexp(dim=-1)
+    else:
+        b, q, _ = attn_weight.shape
+        lse = torch.full((b, q), float('-inf'), dtype=attn_weight.dtype)
     attn_weight = torch.softmax(attn_weight, dim=-1, dtype=torch.float32)
-    return attn_weight.to(query.dtype) @ value, max_logits
+    return attn_weight.to(query.dtype) @ value, lse, max_logits
 
 
 def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, topk, return_max_logits, window_size):
@@ -133,6 +138,7 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
     def torch_attn():
         q2.grad = k2.grad = v2.grad = None
         out = []
+        lse = []
         if return_max_logits:
             max_logits = []
         for i in range(b):
@@ -148,17 +154,19 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
                 return_max_logits=return_max_logits,
             )
             if return_max_logits:
-                OUT, MAX_LOGITS = OUT_TENSORS
+                OUT, LSE, MAX_LOGITS = OUT_TENSORS
             else:
-                OUT, _ = OUT_TENSORS
+                OUT, LSE, _ = OUT_TENSORS
             out.append(OUT.transpose(-3, -2))
+            lse.append(LSE)
             if return_max_logits:
                 max_logits.append(MAX_LOGITS.transpose(-2, -1))
         out = torch.cat(out)
+        lse = torch.cat(lse, dim=-1)
         if return_max_logits:
             max_logits = torch.cat(max_logits, dim=-1).squeeze(1)
-            return out, max_logits
-        return (out,)
+            return out, lse, max_logits
+        return (out, lse)
 
     def fn(provider="FA3"):
         flash_attn(provider)[0].backward(grad_out) if has_bwd else flash_attn(provider)[0]
@@ -168,12 +176,15 @@ def test_flash_attention(b, mean_sq, mean_sk, varlen, h, h_k, d, dv, causal, top
 
     out_flash_attn = full_output_flash_attn[0]
     out_torch_attn = full_output_torch_attn[0]
-
     assert_close(out_flash_attn, torch.nan_to_num(out_torch_attn, nan=0.0), "out")
+
+    out_lse_flash = full_output_flash_attn[1]
+    out_lse_torch = full_output_torch_attn[1]
+    assert_close(out_lse_flash, torch.nan_to_num(out_lse_torch, nan=0.0), "out")
 
     if return_max_logits:
         out_max_logits = full_output_flash_attn[2]
-        out_max_logits_ref = full_output_torch_attn[1]
+        out_max_logits_ref = full_output_torch_attn[2]
         assert_close(out_max_logits, torch.nan_to_num(out_max_logits_ref, nan=0.0), "max_logits")
 
     if has_bwd:
