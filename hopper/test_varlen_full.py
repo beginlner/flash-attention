@@ -1,11 +1,11 @@
-from typing import Tuple, Optional
-
+from typing import Optional
 import math
 import random
-import triton
-import torch
 
-from flash_attn_interface import flash_attn_func, flash_attn_varlen_func, topk_index_to_mask_triton
+import torch
+import triton
+
+from flash_attn_interface import flash_attn_varlen_func
 
 
 def get_attn_bias(s_q, s_k, causal, window, topk_index: Optional[torch.Tensor] = None):
