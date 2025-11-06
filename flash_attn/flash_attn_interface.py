@@ -1221,6 +1221,8 @@ def flash_attn_with_kvcache(
 
 def get_kvcache_block_size(head_dim: int) -> int:
     # This should match the block sizes in the CUDA kernel
+    if head_dim == 576:
+        return 64
     if head_dim <= 64:
         return 256
     elif head_dim <= 128:
