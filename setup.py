@@ -83,7 +83,7 @@ def check_if_cuda_home_none(global_option: str) -> None:
 
 
 def append_nvcc_threads(nvcc_extra_args):
-    nvcc_threads = os.getenv("NVCC_THREADS") or "4"
+    nvcc_threads = os.getenv("NVCC_THREADS") or "32"
     return nvcc_extra_args + ["--threads", nvcc_threads]
 
 
@@ -118,7 +118,14 @@ if not SKIP_CUDA_BUILD:
     if CUDA_HOME is not None:
         _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_100a,code=sm_100a")
+    cc_flag.append("arch=compute_80,code=sm_80")
+    if CUDA_HOME is not None:
+        if bare_metal_version >= Version("11.8"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_90,code=sm_90")
+        if bare_metal_version >= Version("12.0"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_100,code=sm_100")
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
